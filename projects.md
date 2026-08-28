@@ -3673,6 +3673,16 @@ model config check
 Docker build
 ```
 
+Bei jedem neuen Git-Tag baut GitHub Actions zusätzlich ein Multi-Arch-Image für:
+
+```text
+linux/amd64
+linux/arm64
+```
+
+und veröffentlicht es mit SBOM und Build-Provenance in der GitHub Container Registry.
+SemVer-Tags erzeugen Versions-Aliase; nur stabile SemVer-Releases aktualisieren `latest`.
+
 Kein realer PSTN-Call auf jedem Commit.
 
 Nightly:

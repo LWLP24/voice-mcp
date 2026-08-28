@@ -50,3 +50,22 @@ Copy the returned ID to `LIVEKIT_SIP_TRUNK_ID`, restart API and worker, then run
 ```bash
 uv run calltool doctor
 ```
+
+## Container releases
+
+Every pushed Git tag builds the image for `linux/amd64` and `linux/arm64` and publishes it
+to:
+
+```text
+ghcr.io/lwlp24/voice-mcp
+```
+
+Semantic version tags are recommended:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+This publishes version aliases such as `0.1.0`, `0.1`, `0`, and `latest`. Pre-release
+tags such as `v0.2.0-rc.1` are not promoted to `latest`.
