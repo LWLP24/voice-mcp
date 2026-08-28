@@ -1,0 +1,66 @@
+server:
+  host: 0.0.0.0
+  port: 8080
+  health_port: 8081
+mcp:
+  enabled: true
+  path: /mcp
+  protocol: "2026-07-28"
+rest:
+  enabled: true
+  base_path: /v1
+calls:
+  max_concurrent: 2
+  ring_timeout_seconds: 45
+  max_duration_seconds: 1800
+  user_input_timeout_seconds: 180
+voice:
+  realtime:
+    provider: gemini
+    model: gemini-3.1-flash-live-preview
+    voice: Puck
+    thinking_level: minimal
+    input_transcription: true
+    output_transcription: true
+    context_compression:
+      enabled: true
+    session_resumption:
+      enabled: true
+  scripted_tts:
+    provider: gemini
+    model: gemini-3.1-flash-tts-preview
+    voice: Puck
+    enabled: true
+  shadow_stt:
+    enabled: false
+    provider: gemini
+    model: gemini-3.5-transcribe-live
+  supervisor:
+    enabled: true
+    model: gemini-3.7-flash
+    thinking_level: low
+    mode: background
+performance:
+  prewarm_workers: 1
+  event_queue_size: 1024
+  watchdog_silence_seconds: 2.5
+  targets:
+    turn_latency_p50_ms: 600
+    turn_latency_p95_ms: 1200
+    barge_in_stop_p95_ms: 250
+    local_tool_p95_ms: 20
+policy:
+  require_commit_authorization: true
+  allowed_country_codes:
+    - DE
+  block_emergency_numbers: true
+  block_premium_numbers: true
+storage:
+  transcript: false
+  audio: false
+features:
+  shadow_stt: false
+  supervisor: true
+  scripted_confirmations: true
+  cascade_fallback: false
+  semantic_turn_detector: false

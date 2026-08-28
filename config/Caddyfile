@@ -1,0 +1,7 @@
+{$CALLTOOL_DOMAIN:localhost} {
+	reverse_proxy calltool-api:8080
+}
+
+{$LIVEKIT_DOMAIN:livekit.localhost} {
+	reverse_proxy host.docker.internal:7880
+}

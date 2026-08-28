@@ -1,0 +1,71 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "calltool"
+version = "0.1.0"
+description = "Self-hosted MCP and REST telephone execution service for AI agents"
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+license = { text = "MIT" }
+authors = [{ name = "CallTool contributors" }]
+dependencies = [
+  "asyncpg>=0.30,<1",
+  "google-genai>=1.50,<2",
+  "httpx>=0.28,<1",
+  "livekit-agents==1.7.1",
+  "livekit-plugins-google==1.7.0",
+  "mcp==2.1.1",
+  "opentelemetry-api>=1.36,<2",
+  "opentelemetry-exporter-otlp-proto-http>=1.36,<2",
+  "opentelemetry-sdk>=1.36,<2",
+  "phonenumbers>=9,<10",
+  "prometheus-client>=0.22,<1",
+  "pydantic>=2.11,<3",
+  "pydantic-settings>=2.10,<3",
+  "pyyaml>=6.0,<7",
+  "redis>=6,<7",
+  "starlette==1.6.0",
+  "structlog>=25,<26",
+  "uvicorn[standard]==0.52.4",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy>=1.17,<2",
+  "pytest>=8.4,<9",
+  "pytest-asyncio>=1.1,<2",
+  "pytest-cov>=6.2,<7",
+  "ruff>=0.12,<1",
+  "types-pyyaml>=6.0,<7",
+]
+
+[project.scripts]
+calltool = "calltool.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/calltool"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers --strict-config"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+packages = ["calltool"]
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = ["asyncpg", "asyncpg.*"]
+ignore_missing_imports = true

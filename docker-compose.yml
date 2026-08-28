@@ -1,0 +1,133 @@
+name: calltool
+
+x-calltool-environment: &calltool-environment
+  CALLTOOL_ENV: ${CALLTOOL_ENV:-development}
+  CALLTOOL_CONFIG: /app/config/calltool.yaml
+  CALLTOOL_API_KEY: ${CALLTOOL_API_KEY:-change-me}
+  CALLTOOL_LOG_LEVEL: ${CALLTOOL_LOG_LEVEL:-INFO}
+  OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-}
+  DATABASE_URL: postgresql://calltool:${POSTGRES_PASSWORD:-calltool}@postgres:5432/calltool
+  REDIS_URL: redis://redis:6379/0
+  LIVEKIT_URL: ws://host.docker.internal:7880
+  LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-devkey}
+  LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-secret}
+  LIVEKIT_SIP_TRUNK_ID: ${LIVEKIT_SIP_TRUNK_ID:-}
+  GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+  WEBHOOK_URL: ${WEBHOOK_URL:-}
+  TELNYX_SIP_ADDRESS: ${TELNYX_SIP_ADDRESS:-sip.telnyx.eu}
+  TELNYX_SIP_USERNAME: ${TELNYX_SIP_USERNAME:-}
+  TELNYX_SIP_PASSWORD: ${TELNYX_SIP_PASSWORD:-}
+  TELNYX_FROM_NUMBER: ${TELNYX_FROM_NUMBER:-}
+  WEBHOOK_SIGNING_SECRET: ${WEBHOOK_SIGNING_SECRET:-change-me}
+
+x-calltool-service: &calltool-service
+  build: .
+  restart: unless-stopped
+  environment: *calltool-environment
+  extra_hosts:
+    - host.docker.internal:host-gateway
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:18.1-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: calltool
+      POSTGRES_USER: calltool
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-calltool}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U calltool -d calltool"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:8.2.1-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  livekit:
+    image: livekit/livekit-server:v1.13.5
+    restart: unless-stopped
+    command: ["--config", "/etc/livekit.yaml"]
+    network_mode: host
+    volumes:
+      - ./config/livekit.yaml:/etc/livekit.yaml:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  livekit-sip:
+    image: livekit/sip:v1.11.0
+    restart: unless-stopped
+    command: ["--config", "/etc/sip.yaml"]
+    network_mode: host
+    volumes:
+      - ./config/sip.yaml:/etc/sip.yaml:ro
+    depends_on:
+      livekit:
+        condition: service_started
+
+  calltool-api:
+    <<: *calltool-service
+    command: ["api"]
+    ports:
+      - "127.0.0.1:8080:8080"
+
+  calltool-worker:
+    <<: *calltool-service
+    command: ["worker", "start"]
+    stop_grace_period: 35m
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      livekit:
+        condition: service_started
+
+  caddy:
+    image: caddy:2.11.4-alpine
+    restart: unless-stopped
+    environment:
+      CALLTOOL_DOMAIN: ${CALLTOOL_DOMAIN:-localhost}
+      LIVEKIT_DOMAIN: ${LIVEKIT_DOMAIN:-livekit.localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./config/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    depends_on:
+      calltool-api:
+        condition: service_started
+      livekit:
+        condition: service_started
+
+volumes:
+  postgres_data:
+  redis_data:
+  caddy_data:
+  caddy_config:
