@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import httpx
 import pytest
 from pydantic import SecretStr
@@ -8,11 +10,14 @@ from calltool.calls.dispatcher import NullCallDispatcher
 from calltool.config import Settings
 from calltool.storage.memory import MemoryCallRepository
 
+DEFAULT_PROMPT_DIR = Path(__file__).parents[2] / "config" / "prompts" / "default"
+
 
 def build_app() -> Starlette:
     settings = Settings(
         CALLTOOL_ENV="test",
         CALLTOOL_API_KEY=SecretStr("test-secret"),
+        CALLTOOL_PROMPT_DIR=str(DEFAULT_PROMPT_DIR),
     )
     return create_app(
         settings,

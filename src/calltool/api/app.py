@@ -26,6 +26,7 @@ from calltool.policy.engine import PolicyEngine
 from calltool.realtime.events import build_event_dispatcher
 from calltool.storage.memory import MemoryCallRepository
 from calltool.storage.postgres import PostgresCallRepository
+from calltool.voice.prompts import PromptProfile
 
 logger = structlog.get_logger(__name__)
 
@@ -52,10 +53,9 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[None]:
         configure_logging(settings.CALLTOOL_LOG_LEVEL)
-        configure_tracing(
-            "calltool-api", settings.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
-        )
+        configure_tracing("calltool-api", settings.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT)
         settings.validate_production()
+        PromptProfile.load(settings)
         selected_repository = repository
         selected_dispatcher = dispatcher
         if selected_repository is None:

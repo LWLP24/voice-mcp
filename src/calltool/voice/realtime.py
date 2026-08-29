@@ -13,7 +13,7 @@ from openai.types.realtime import AudioTranscription, RealtimeReasoning
 from calltool.calls.models import CallRecord, CallVoiceOptions
 from calltool.config import Settings
 from calltool.language import normalize_language_code
-from calltool.voice.prompts import compile_call_prompt
+from calltool.voice.prompts import PromptProfile
 
 VoiceProvider = Literal["gemini", "openai"]
 
@@ -42,6 +42,7 @@ class VoiceRuntime:
     session: AgentSession[None]
     agent: Agent
     selection: VoiceSelection
+    prompt_profile: PromptProfile
     scripted_tts: tts.TTS[Any] | None
 
 
@@ -109,7 +110,8 @@ def build_voice_runtime(
 ) -> VoiceRuntime:
     voice = settings.config.voice
     selection = resolve_voice_selection(settings, call.request.voice)
-    prompt = compile_call_prompt(call, selection.language)
+    prompt_profile = PromptProfile.load(settings)
+    prompt = prompt_profile.system_prompt(call, selection.language)
     realtime: llm.RealtimeModel
 
     if selection.provider == "openai":
@@ -197,5 +199,6 @@ def build_voice_runtime(
         session=session,
         agent=agent,
         selection=selection,
+        prompt_profile=prompt_profile,
         scripted_tts=scripted_tts,
     )

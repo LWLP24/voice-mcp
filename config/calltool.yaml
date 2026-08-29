@@ -20,7 +20,6 @@ calls:
     objective: >-
       Nimm das Anliegen des Anrufers auf, beantworte allgemeine Fragen soweit möglich
       und fasse das Gespräch strukturiert zusammen.
-    greeting: Guten Tag, hier ist der KI-Assistent von LWLP. Wie kann ich Ihnen helfen?
     constraints:
       - Keine verbindlichen Zusagen oder kostenpflichtigen Handlungen vornehmen.
       - Bei fehlenden Informationen transparent bleiben und nichts erfinden.
@@ -55,6 +54,16 @@ voice:
     model: gemini-3.7-flash
     thinking_level: low
     mode: background
+  prompts:
+    directory: prompts/default
+    system_inbound: system-inbound.md
+    system_outbound: system-outbound.md
+    greeting_inbound: greeting-inbound.txt
+    greeting_outbound: greeting-outbound.txt
+    greeting_instruction: greeting-instruction.md
+    watchdog_instruction: watchdog-instruction.md
+    watchdog_fallback: watchdog-fallback.txt
+    supervisor: supervisor.md
 performance:
   prewarm_workers: 1
   event_queue_size: 1024

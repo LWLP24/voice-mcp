@@ -1,0 +1,1 @@
+Guten Tag, hier ist ein KI-Assistent im Auftrag eines Kunden. Ich rufe wegen Folgendem an: {{ objective }}.

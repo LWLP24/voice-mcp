@@ -250,6 +250,64 @@ The exact model names and integration options are documented by
 [OpenAI GPT-Realtime-2.1 Mini](https://developers.openai.com/api/docs/models/gpt-realtime-2.1-mini),
 and the [LiveKit OpenAI Realtime plugin](https://docs.livekit.io/agents/models/realtime/plugins/openai/).
 
+### File-based prompt profiles
+
+System prompts and default greetings are not embedded in Python. The checked-in profile
+is located at `config/prompts/default` and contains:
+
+| File | Purpose |
+| --- | --- |
+| `system-outbound.md` | Complete system prompt for outbound calls |
+| `system-inbound.md` | Complete system prompt for inbound calls |
+| `greeting-outbound.txt` | Default outbound greeting source text |
+| `greeting-inbound.txt` | Default inbound greeting source text |
+| `greeting-instruction.md` | Instruction used when the native realtime model localizes the greeting |
+| `watchdog-instruction.md` | Model instruction used to recover from an unexpected silent turn |
+| `watchdog-fallback.txt` | Final scripted recovery phrase if model recovery fails |
+| `supervisor.md` | Prompt for the optional post-call outcome supervisor |
+
+To create a company-specific profile, copy the directory and edit the copied files:
+
+```bash
+cp -a config/prompts/default config/prompts/lwlp
+```
+
+Then select it in `.env` using its path inside the Compose container:
+
+```dotenv
+CALLTOOL_PROMPT_DIR=/app/config/prompts/lwlp
+```
+
+Alternatively, change `voice.prompts.directory` and the optional filenames in
+`config/calltool.yaml`. Compose mounts the complete local `config` directory read-only
+at `/app/config`, so prompt edits do not require rebuilding the image. A profile is read
+as one snapshot when a call starts; changes therefore affect the next call, never the
+middle of an active conversation.
+
+Templates use deliberately limited `{{ placeholder }}` substitution without executable
+template code. Available placeholders are:
+
+- Call data: `call_id`, `direction`, `objective`, `target_name`,
+  `target_phone_number`, `caller_name`, `caller_phone_number`,
+  `called_phone_number`, and `organization_name`.
+- Runtime data: `language`, `context_json`, `constraints_json`, `permissions_json`,
+  `may_commit`, `may_accept_costs`, and `may_disclose_json`.
+- Greeting instruction only: `greeting_json`, containing the rendered greeting as a
+  JSON string.
+- Supervisor only: `outcome_json`, containing the structured call result.
+
+Unknown or malformed placeholders, missing files, invalid UTF-8, empty files, and files
+larger than 128 KiB make the API/worker validation fail. Check a profile before calling:
+
+```bash
+docker compose run --rm calltool-api doctor
+```
+
+For security, MCP and REST callers cannot submit arbitrary server-side file paths. The
+operator selects the mounted profile, while call-specific objective, context, permissions,
+language, and voice continue to arrive through the normal request schema. Keep the AI
+disclosure in custom greeting and system templates where legally required.
+
 ## Quick start
 
 Once the prerequisites and `.env` are ready, validate and start the stack:
@@ -295,9 +353,9 @@ docker compose run --rm calltool-api doctor --call +49...
 ```
 
 Each inbound caller is routed to a dedicated room and the `calltool` worker answers with
-the greeting configured under `calls.inbound` in `config/calltool.yaml`. The first inbound
-call should be made only after the Telnyx number is assigned to the SIP Connection and
-the bootstrap has completed.
+the greeting from `config/prompts/default/greeting-inbound.txt` or the selected custom
+prompt profile. The first inbound call should be made only after the Telnyx number is
+assigned to the SIP Connection and the bootstrap has completed.
 
 ### Local development without the full Compose stack
 

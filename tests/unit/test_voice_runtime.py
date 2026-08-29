@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 from pydantic import SecretStr, ValidationError
@@ -14,8 +15,10 @@ from calltool.calls.models import (
     CallVoiceOptions,
 )
 from calltool.config import Settings
-from calltool.voice.prompts import compile_call_prompt, greeting_instruction_for
+from calltool.voice.prompts import PromptProfile
 from calltool.voice.realtime import build_voice_runtime, resolve_voice_selection
+
+DEFAULT_PROMPT_DIR = Path(__file__).parents[2] / "config" / "prompts" / "default"
 
 
 def make_call(voice: CallVoiceOptions | None = None) -> CallRecord:
@@ -35,7 +38,15 @@ def make_call(voice: CallVoiceOptions | None = None) -> CallRecord:
 
 
 def test_default_voice_selection_stays_on_gemini() -> None:
-    selection = resolve_voice_selection(Settings(CALLTOOL_ENV="test"))
+    selection = resolve_voice_selection(
+        Settings(
+            CALLTOOL_ENV="test",
+            CALLTOOL_VOICE_PROVIDER="gemini",
+            CALLTOOL_VOICE_MODEL="gemini-3.1-flash-live-preview",
+            CALLTOOL_VOICE_LANGUAGE="de",
+            CALLTOOL_VOICE_NAME="Puck",
+        )
+    )
 
     assert selection.provider == "gemini"
     assert selection.model == "gemini-3.1-flash-live-preview"
@@ -123,6 +134,7 @@ async def test_openai_runtime_uses_native_voice_and_transcription_language() -> 
         CALLTOOL_VOICE_MODEL="gpt-realtime-2.1-mini",
         CALLTOOL_VOICE_LANGUAGE="en",
         CALLTOOL_VOICE_NAME="marin",
+        CALLTOOL_PROMPT_DIR=str(DEFAULT_PROMPT_DIR),
     )
 
     runtime = build_voice_runtime(make_call(), settings, [])
@@ -138,9 +150,12 @@ async def test_openai_runtime_uses_native_voice_and_transcription_language() -> 
 
 def test_prompt_and_native_greeting_receive_selected_language() -> None:
     call = make_call(CallVoiceOptions(language="en"))
+    profile = PromptProfile.load(
+        Settings(CALLTOOL_ENV="test", CALLTOOL_PROMPT_DIR=str(DEFAULT_PROMPT_DIR))
+    )
 
-    prompt = compile_call_prompt(call, "en")
-    greeting_instruction = greeting_instruction_for(call, "en")
+    prompt = profile.system_prompt(call, "en")
+    greeting_instruction = profile.greeting_instruction(call, "en")
 
     assert "BCP-47-Code en" in prompt
     assert "BCP-47-Code en" in greeting_instruction

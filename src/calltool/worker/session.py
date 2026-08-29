@@ -22,6 +22,8 @@ class SessionObserver:
         call_id: str,
         *,
         watchdog_silence_seconds: float,
+        watchdog_recovery_instruction: str,
+        watchdog_fallback_phrase: str,
         on_unrecoverable: UnrecoverableHandler,
     ) -> None:
         self._session = session
@@ -32,6 +34,8 @@ class SessionObserver:
         self._watchdog = VoiceWatchdog(
             session,
             silence_seconds=watchdog_silence_seconds,
+            recovery_instruction=watchdog_recovery_instruction,
+            fallback_phrase=watchdog_fallback_phrase,
             on_event=self.persist,
             on_unrecoverable=on_unrecoverable,
         )
@@ -112,9 +116,7 @@ class SessionObserver:
             )
 
     def _on_false_interruption(self, event: Any) -> None:
-        self.spawn(
-            self.persist("call.false_interruption", {"resumed": bool(event.resumed)})
-        )
+        self.spawn(self.persist("call.false_interruption", {"resumed": bool(event.resumed)}))
 
     def _on_error(self, event: Any) -> None:
         self.spawn(

@@ -8,6 +8,7 @@ from livekit.agents import AgentServer, JobContext, cli
 from calltool.config import get_settings
 from calltool.observability.logging import configure_logging
 from calltool.observability.tracing import configure_tracing
+from calltool.voice.prompts import PromptProfile
 from calltool.worker.agent import handle_call
 
 settings = get_settings()
@@ -31,9 +32,8 @@ async def calltool_agent(ctx: JobContext) -> None:
 
 def run() -> None:
     configure_logging(settings.CALLTOOL_LOG_LEVEL)
-    configure_tracing(
-        "calltool-worker", settings.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
-    )
+    configure_tracing("calltool-worker", settings.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT)
+    PromptProfile.load(settings)
     os.environ.setdefault("LIVEKIT_URL", settings.LIVEKIT_URL)
     os.environ.setdefault("LIVEKIT_API_KEY", settings.LIVEKIT_API_KEY)
     os.environ.setdefault("LIVEKIT_API_SECRET", settings.LIVEKIT_API_SECRET.get_secret_value())

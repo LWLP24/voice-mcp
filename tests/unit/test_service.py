@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from calltool.calls.dispatcher import NullCallDispatcher
@@ -12,12 +14,15 @@ from calltool.calls.service import CallService
 from calltool.config import CallsConfig, FileConfig, Settings
 from calltool.policy.engine import PolicyEngine
 from calltool.storage.memory import MemoryCallRepository
-from calltool.voice.prompts import compile_call_prompt, greeting_for
+from calltool.voice.prompts import PromptProfile
+
+DEFAULT_PROMPT_DIR = Path(__file__).parents[2] / "config" / "prompts" / "default"
 
 
 def make_settings(max_concurrent: int = 2) -> Settings:
     return Settings(
         CALLTOOL_ENV="test",
+        CALLTOOL_PROMPT_DIR=str(DEFAULT_PROMPT_DIR),
         config=FileConfig(calls=CallsConfig(max_concurrent=max_concurrent)),
     )
 
@@ -156,11 +161,13 @@ async def test_inbound_call_is_connected_safe_and_idempotent() -> None:
     assert first.request.permissions.may_commit is False
     assert first.request.permissions.may_accept_costs is False
     assert first.state.room_name == "calltool-inbound-test"
-    assert greeting_for(first) == (
+    prompt_profile = PromptProfile.load(settings)
+    assert prompt_profile.greeting(first, "de") == (
         "Guten Tag, hier ist der KI-Assistent von LWLP. Wie kann ich Ihnen helfen?"
     )
-    prompt = compile_call_prompt(first)
-    assert "nimmst einen eingehenden Anruf für LWLP entgegen" in prompt
+    prompt = prompt_profile.system_prompt(first, "de")
+    assert "nimmst einen eingehenden Anruf für" in prompt
+    assert "LWLP entgegen" in prompt
     assert "authorize_commit" not in prompt
     assert "send_dtmf" not in prompt
     assert [event.type for event in await repository.list_events(first.id)] == [

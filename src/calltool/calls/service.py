@@ -115,7 +115,6 @@ class CallService:
             "caller_number": caller_number,
             "called_number": called_number,
             "organization_name": inbound.organization_name,
-            "inbound_greeting": inbound.greeting,
         }
         if sip_call_id:
             context["sip_call_id"] = sip_call_id[:256]

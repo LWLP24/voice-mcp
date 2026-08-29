@@ -7,11 +7,13 @@ from google.genai import types
 
 from calltool.calls.models import CallOutcome, CallRecord
 from calltool.config import Settings
+from calltool.voice.prompts import PromptProfile
 
 
 class GeminiSupervisor:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, prompt_profile: PromptProfile) -> None:
         self._settings = settings
+        self._prompt_profile = prompt_profile
         api_key = settings.GOOGLE_API_KEY.get_secret_value()
         self._client = (
             genai.Client(api_key=api_key)
@@ -19,19 +21,19 @@ class GeminiSupervisor:
             else None
         )
 
-    async def enrich_outcome(self, call: CallRecord, outcome: CallOutcome) -> CallOutcome:
+    async def enrich_outcome(
+        self,
+        call: CallRecord,
+        outcome: CallOutcome,
+        language: str,
+    ) -> CallOutcome:
         if not self._settings.config.voice.supervisor.enabled or self._client is None:
             return outcome
-        prompt = {
-            "task": "Formuliere ausschließlich eine knappe deutsche Zusammenfassung.",
-            "rule": "Erfinde keine Fakten oder Commitments.",
-            "objective": call.request.objective,
-            "structured_outcome": outcome.model_dump(mode="json"),
-        }
+        prompt = self._prompt_profile.supervisor_prompt(call, outcome, language)
         try:
             response = await self._client.aio.models.generate_content(
                 model=self._settings.config.voice.supervisor.model,
-                contents=json.dumps(prompt, ensure_ascii=False),
+                contents=prompt,
                 config=types.GenerateContentConfig(
                     thinking_config=types.ThinkingConfig(
                         thinking_level=types.ThinkingLevel(

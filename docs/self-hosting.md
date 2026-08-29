@@ -84,10 +84,11 @@ LIVEKIT_SIP_TRUNK_ID=
 AnchorSite controls media placement separately.
 
 Inbound behavior is configured in `config/calltool.yaml` under `calls.inbound`. It is
-enabled by default with an LWLP test greeting, no commitment/cost permissions, and an
-allowlist for the two European Telnyx SIP signaling proxies currently documented at
-`sip.telnyx.com`. If the selected Telnyx SIP region changes, update `allowed_addresses`
-before running the bootstrap again.
+enabled by default with no commitment/cost permissions and an allowlist for the two
+European Telnyx SIP signaling proxies currently documented at `sip.telnyx.com`. The
+default greeting is stored in `config/prompts/default/greeting-inbound.txt`. If the
+selected Telnyx SIP region changes, update `allowed_addresses` before running the
+bootstrap again.
 
 Select the realtime voice provider globally with `.env`. The full OpenAI model and its
 faster, lower-cost mini variant are both supported:
@@ -118,6 +119,18 @@ The default background supervisor remains Gemini-based. If it stays enabled, con
 installation, disable `voice.supervisor.enabled` in `config/calltool.yaml` and leave the
 optional Gemini shadow STT disabled. Gemini scripted TTS is skipped automatically for
 OpenAI calls.
+
+System prompts and greeting texts are loaded from the profile configured under
+`voice.prompts` in `config/calltool.yaml`. To use a separate profile without changing
+YAML, copy `config/prompts/default`, edit the copy, and set for example:
+
+```dotenv
+CALLTOOL_PROMPT_DIR=/app/config/prompts/my-company
+```
+
+Compose mounts `./config` read-only into both CallTool containers. Prompt changes are
+loaded for the next call without rebuilding the image. Run `calltool doctor` after every
+change; it rejects missing files and invalid placeholders before a test call is placed.
 
 ## 4. Start and bootstrap
 

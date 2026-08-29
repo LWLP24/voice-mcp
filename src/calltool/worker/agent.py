@@ -23,7 +23,6 @@ from calltool.config import Settings
 from calltool.policy.engine import PolicyEngine
 from calltool.realtime.events import build_event_dispatcher
 from calltool.storage.postgres import PostgresCallRepository
-from calltool.voice.prompts import greeting_for, greeting_instruction_for
 from calltool.voice.realtime import build_voice_runtime
 from calltool.voice.scripted_speech import frame_stream, pre_synthesize
 from calltool.voice.supervisor import GeminiSupervisor
@@ -58,7 +57,7 @@ async def handle_call(ctx: JobContext, settings: Settings) -> None:
         PolicyEngine(settings.config.policy),
         settings,
     )
-    supervisor = GeminiSupervisor(settings)
+    supervisor: GeminiSupervisor | None = None
     observer: SessionObserver | None = None
     greeting_task: asyncio.Task[rtc.AudioFrame] | None = None
     try:
@@ -112,7 +111,8 @@ async def handle_call(ctx: JobContext, settings: Settings) -> None:
         )
         tools = build_tools(tool_runtime, direction=call.direction)
         voice = build_voice_runtime(call, settings, tools)
-        greeting = greeting_for(call)
+        supervisor = GeminiSupervisor(settings, voice.prompt_profile)
+        greeting = voice.prompt_profile.greeting(call, voice.selection.language)
         if voice.scripted_tts is not None:
             greeting_task = asyncio.create_task(pre_synthesize(voice.scripted_tts, greeting))
 
@@ -203,6 +203,12 @@ async def handle_call(ctx: JobContext, settings: Settings) -> None:
             repository,
             call.id,
             watchdog_silence_seconds=settings.config.performance.watchdog_silence_seconds,
+            watchdog_recovery_instruction=voice.prompt_profile.watchdog_instruction(
+                call, voice.selection.language
+            ),
+            watchdog_fallback_phrase=voice.prompt_profile.watchdog_fallback(
+                call, voice.selection.language
+            ),
             on_unrecoverable=on_watchdog_unrecoverable,
         )
         observer.attach()
@@ -223,7 +229,9 @@ async def handle_call(ctx: JobContext, settings: Settings) -> None:
             )
         else:
             voice.session.generate_reply(
-                instructions=greeting_instruction_for(call, voice.selection.language),
+                instructions=voice.prompt_profile.greeting_instruction(
+                    call, voice.selection.language
+                ),
                 allow_interruptions=True,
             )
 
@@ -254,7 +262,12 @@ async def handle_call(ctx: JobContext, settings: Settings) -> None:
         voice.session.shutdown(drain=True)
         await observer.close()
         observer = None
-        await _complete_call(repository, supervisor, call.id)
+        await _complete_call(
+            repository,
+            supervisor,
+            call.id,
+            language=voice.selection.language,
+        )
         ctx.shutdown("call completed")
     except Exception as exc:
         logger.exception("call worker failed", call_id=call_id)
@@ -282,7 +295,8 @@ async def handle_call(ctx: JobContext, settings: Settings) -> None:
                 await greeting_task
         if observer is not None:
             await observer.close()
-        await supervisor.close()
+        if supervisor is not None:
+            await supervisor.close()
         await service.close()
 
 
@@ -312,7 +326,11 @@ async def _wait_for_call_end(
 
 
 async def _complete_call(
-    repository: PostgresCallRepository, supervisor: GeminiSupervisor, call_id: str
+    repository: PostgresCallRepository,
+    supervisor: GeminiSupervisor,
+    call_id: str,
+    *,
+    language: str,
 ) -> None:
     call = await repository.get_call(call_id)
     if call is None or call.status.terminal:
@@ -345,7 +363,7 @@ async def _complete_call(
             )
     else:
         outcome = call.outcome
-    outcome = await supervisor.enrich_outcome(call, outcome)
+    outcome = await supervisor.enrich_outcome(call, outcome, language)
     await repository.update_call(
         call.id,
         status=CallStatus.COMPLETED,

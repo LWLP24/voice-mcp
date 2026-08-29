@@ -35,7 +35,6 @@ class InboundCallsConfig(BaseModel):
         "Nimm das Anliegen des Anrufers auf, beantworte allgemeine Fragen soweit möglich "
         "und fasse das Gespräch strukturiert zusammen."
     )
-    greeting: str = "Guten Tag, hier ist der KI-Assistent von LWLP. Wie kann ich Ihnen helfen?"
     constraints: list[str] = Field(
         default_factory=lambda: [
             "Keine verbindlichen Zusagen oder kostenpflichtigen Handlungen vornehmen.",
@@ -97,11 +96,41 @@ class SupervisorConfig(BaseModel):
     mode: Literal["background", "on_demand"] = "background"
 
 
+class PromptProfileConfig(BaseModel):
+    directory: Path = Path("prompts/default")
+    system_inbound: str = "system-inbound.md"
+    system_outbound: str = "system-outbound.md"
+    greeting_inbound: str = "greeting-inbound.txt"
+    greeting_outbound: str = "greeting-outbound.txt"
+    greeting_instruction: str = "greeting-instruction.md"
+    watchdog_instruction: str = "watchdog-instruction.md"
+    watchdog_fallback: str = "watchdog-fallback.txt"
+    supervisor: str = "supervisor.md"
+
+    @field_validator(
+        "system_inbound",
+        "system_outbound",
+        "greeting_inbound",
+        "greeting_outbound",
+        "greeting_instruction",
+        "watchdog_instruction",
+        "watchdog_fallback",
+        "supervisor",
+    )
+    @classmethod
+    def validate_filename(cls, value: str) -> str:
+        filename = value.strip()
+        if not filename or Path(filename).name != filename:
+            raise ValueError("prompt filenames must be plain filenames without directories")
+        return filename
+
+
 class VoiceConfig(BaseModel):
     realtime: RealtimeVoiceConfig = Field(default_factory=RealtimeVoiceConfig)
     scripted_tts: ScriptedTTSConfig = Field(default_factory=ScriptedTTSConfig)
     shadow_stt: ShadowSTTConfig = Field(default_factory=ShadowSTTConfig)
     supervisor: SupervisorConfig = Field(default_factory=SupervisorConfig)
+    prompts: PromptProfileConfig = Field(default_factory=PromptProfileConfig)
 
 
 class PerformanceTargets(BaseModel):
@@ -183,6 +212,7 @@ class Settings(BaseSettings):
     CALLTOOL_VOICE_MODEL: str = ""
     CALLTOOL_VOICE_LANGUAGE: str = ""
     CALLTOOL_VOICE_NAME: str = ""
+    CALLTOOL_PROMPT_DIR: str = ""
     WEBHOOK_URL: str = ""
     WEBHOOK_SIGNING_SECRET: SecretStr = SecretStr("change-me")
 

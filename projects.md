@@ -519,9 +519,27 @@ Konsequenz
 
 Wir designen um diese Einschränkungen herum, statt dagegen anzukämpfen.
 
-## 11. Keine dynamischen Systemprompt-Updates
+## 11. Dateibasierte Prompts, aber keine Updates mitten im Call
 
-Der komplette Auftrag wird beim Session Start eingebettet:
+Die statischen Gesprächsregeln und Standardbegrüßungen liegen nicht im Python-Code,
+sondern in einem Prompt-Profil unter `config/prompts/`. Getrennte Dateien existieren für:
+
+```text
+Inbound-Systemprompt
+Outbound-Systemprompt
+Inbound-Begrüßung
+Outbound-Begrüßung
+native Realtime-Begrüßungsanweisung
+Watchdog-Recovery und -Fallback
+Supervisor-Zusammenfassung
+```
+
+Die Vorlagen verwenden ausschließlich validierte `{{ placeholder }}`-Ersetzung ohne
+ausführbaren Template-Code. Der Betreiber wählt das Profil über YAML oder
+`CALLTOOL_PROMPT_DIR`; MCP-/REST-Aufträge dürfen keine beliebigen Dateipfade an den Server
+übergeben.
+
+Der komplette Auftrag wird beim Session-Start aus dem ausgewählten Profil kompiliert:
 
 ```text
 IDENTITY
@@ -542,6 +560,10 @@ Nicht:
 Session läuft
 → update_instructions(...)
 ```
+
+Das Profil wird für jeden neuen Call erneut eingelesen und bleibt danach als konsistenter
+Snapshot an dessen Voice-Runtime gebunden. Änderungen wirken somit beim nächsten Anruf,
+nicht mitten in einem laufenden Gespräch.
 
 ## 12. Dynamischer State läuft über Tools
 
@@ -1767,7 +1789,16 @@ calltool/
 ├── config/
 │   ├── calltool.yaml
 │   ├── livekit.yaml
-│   └── sip.yaml
+│   ├── sip.yaml
+│   └── prompts/default/
+│       ├── system-inbound.md
+│       ├── system-outbound.md
+│       ├── greeting-inbound.txt
+│       ├── greeting-outbound.txt
+│       ├── greeting-instruction.md
+│       ├── watchdog-instruction.md
+│       ├── watchdog-fallback.txt
+│       └── supervisor.md
 │
 ├── src/calltool/
 │   ├── __main__.py
@@ -2791,8 +2822,10 @@ Output:
 [OK] LiveKit
 [OK] LiveKit SIP
 [OK] Telnyx configuration
-[OK] Gemini Live
-     gemini-3.1-flash-live-preview
+[OK] Prompt profile
+     /app/config/prompts/default (8 files)
+[OK] Gemini/OpenAI Realtime
+     ausgewähltes Modell, Sprache und Stimme
 [OK] Gemini 3.7
      gemini-3.7-flash
 [OK] Gemini TTS
@@ -2920,6 +2953,16 @@ voice:
     model: gemini-3.7-flash
     thinking_level: low
     mode: background
+  prompts:
+    directory: prompts/default
+    system_inbound: system-inbound.md
+    system_outbound: system-outbound.md
+    greeting_inbound: greeting-inbound.txt
+    greeting_outbound: greeting-outbound.txt
+    greeting_instruction: greeting-instruction.md
+    watchdog_instruction: watchdog-instruction.md
+    watchdog_fallback: watchdog-fallback.txt
+    supervisor: supervisor.md
 performance:
   prewarm_workers: 1
   targets:
@@ -3176,6 +3219,7 @@ CALLTOOL_VOICE_PROVIDER
 CALLTOOL_VOICE_MODEL
 CALLTOOL_VOICE_LANGUAGE
 CALLTOOL_VOICE_NAME
+CALLTOOL_PROMPT_DIR
 CALLTOOL_API_KEY
 WEBHOOK_SIGNING_SECRET
 ```
@@ -3257,7 +3301,8 @@ persistent CallRequest
 LiveKit dispatch
         ↓
 Call Worker
-        ├─ compile prompt
+        ├─ load + validate prompt profile
+        ├─ compile per-call prompt
         ├─ warm Gemini
         ├─ prepare scripted greeting
         └─ dial SIP

@@ -13,6 +13,7 @@ from calltool.calls.service import CallService
 from calltool.config import get_settings
 from calltool.policy.engine import PolicyEngine
 from calltool.storage.postgres import PostgresCallRepository
+from calltool.voice.prompts import PromptProfile
 from calltool.voice.realtime import resolve_voice_selection
 
 
@@ -86,6 +87,17 @@ async def run(call_number: str | None = None) -> int:
             else "address, credentials, or caller number missing",
         )
     )
+    try:
+        prompt_profile = PromptProfile.load(settings)
+        checks.append(
+            Check(
+                "Prompt profile",
+                True,
+                f"{prompt_profile.directory} ({len(prompt_profile.source_files)} files)",
+            )
+        )
+    except ValueError as exc:
+        checks.append(Check("Prompt profile", False, str(exc)))
     if settings.config.calls.inbound.enabled:
         inbound_client: api.LiveKitAPI | None = None
         try:

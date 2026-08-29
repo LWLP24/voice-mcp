@@ -1,0 +1,1 @@
+Guten Tag, hier ist der KI-Assistent von {{ organization_name }}. Wie kann ich Ihnen helfen?

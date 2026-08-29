@@ -19,11 +19,15 @@ class VoiceWatchdog:
         session: AgentSession[Any],
         *,
         silence_seconds: float,
+        recovery_instruction: str,
+        fallback_phrase: str,
         on_event: WatchdogEventHandler,
         on_unrecoverable: UnrecoverableHandler,
     ) -> None:
         self._session = session
         self._silence_seconds = silence_seconds
+        self._recovery_instruction = recovery_instruction
+        self._fallback_phrase = fallback_phrase
         self._on_event = on_event
         self._on_unrecoverable = on_unrecoverable
         self._tool_depth = 0
@@ -75,10 +79,7 @@ class VoiceWatchdog:
             self._agent_spoke.clear()
             try:
                 self._session.generate_reply(
-                    instructions=(
-                        "Reagiere jetzt kurz und direkt auf die letzte Äußerung. "
-                        "Erfinde keine Gesprächsinhalte."
-                    ),
+                    instructions=self._recovery_instruction,
                     allow_interruptions=True,
                 )
                 async with asyncio.timeout(2.0):
@@ -90,12 +91,10 @@ class VoiceWatchdog:
 
             try:
                 self._session.say(
-                    "Entschuldigung, die Verbindung hakt gerade einen Moment.",
+                    self._fallback_phrase,
                     allow_interruptions=True,
                 )
-                await self._on_event(
-                    "call.watchdog_recovered", {"method": "scripted_phrase"}
-                )
+                await self._on_event("call.watchdog_recovered", {"method": "scripted_phrase"})
             except RuntimeError:
                 await self._on_event(
                     "call.watchdog_unrecoverable", {"reason": "session_unavailable"}
