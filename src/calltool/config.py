@@ -26,11 +26,32 @@ class RESTConfig(BaseModel):
     base_path: str = "/v1"
 
 
+class InboundCallsConfig(BaseModel):
+    enabled: bool = True
+    organization_name: str = "LWLP"
+    objective: str = (
+        "Nimm das Anliegen des Anrufers auf, beantworte allgemeine Fragen soweit möglich "
+        "und fasse das Gespräch strukturiert zusammen."
+    )
+    greeting: str = "Guten Tag, hier ist der KI-Assistent von LWLP. Wie kann ich Ihnen helfen?"
+    constraints: list[str] = Field(
+        default_factory=lambda: [
+            "Keine verbindlichen Zusagen oder kostenpflichtigen Handlungen vornehmen.",
+            "Bei fehlenden Informationen transparent bleiben und nichts erfinden.",
+        ]
+    )
+    room_prefix: str = Field(default="calltool-inbound-", min_length=1, max_length=64)
+    allowed_addresses: list[str] = Field(
+        default_factory=lambda: ["185.246.41.140/32", "185.246.41.141/32"]
+    )
+
+
 class CallsConfig(BaseModel):
     max_concurrent: int = Field(default=2, ge=1)
     ring_timeout_seconds: int = Field(default=45, ge=1)
     max_duration_seconds: int = Field(default=1800, ge=1)
     user_input_timeout_seconds: int = Field(default=180, ge=1)
+    inbound: InboundCallsConfig = Field(default_factory=InboundCallsConfig)
 
 
 class ToggleConfig(BaseModel):

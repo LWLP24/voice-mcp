@@ -34,7 +34,7 @@ Hermes / Claude / OpenAI / eigener Agent / n8n
                     ▼
                PostgreSQL
                     │
-                    │ LiveKit dispatch
+                    │ LiveKit dispatch / inbound SIP dispatch rule
                     ▼
 ┌────────────────────────────────────────┐
 │             CallTool Worker            │
@@ -52,7 +52,7 @@ Hermes / Claude / OpenAI / eigener Agent / n8n
                     │
                 LiveKit SIP
                     │
-                 Telnyx SIP
+                Telnyx SIP ↔ PSTN
                     │
                     ▼
                  Telefon
@@ -2137,6 +2137,8 @@ LiveKit SIP macht:
 SIP Participant
 RTP Media
 Outbound Call
+Inbound Trunk
+Inbound Dispatch Rule
 DTMF
 Hangup
 ```
@@ -2144,11 +2146,15 @@ Hangup
 **Quelle:**
 
 - <https://docs.livekit.io/telephony/making-calls/outbound-calls/>
+- <https://docs.livekit.io/telephony/accepting-calls/inbound-trunk/>
+- <https://docs.livekit.io/telephony/accepting-calls/dispatch-rule/>
 - <https://docs.livekit.io/telephony/start/providers/telnyx/>
 - <https://developers.telnyx.com/docs/voice/sip-trunking/livekit-configuration-guide>
 - <https://sip.telnyx.com/>
 
 ## 78. SIP Flow
+
+Outbound:
 
 ```text
 CallTool Worker
@@ -2167,6 +2173,27 @@ PSTN
    │
 Ziel
 ```
+
+Inbound:
+
+```text
+Anrufer
+   │
+Telnyx DID / FQDN Connection
+   │
+LiveKit SIP Inbound Trunk
+   │
+Individual Dispatch Rule
+   │
+eigener LiveKit Room + CallTool Agent
+   │
+Gemini Live
+```
+
+Der Inbound-Worker erzeugt beim Connect einen durable Call-Datensatz mit
+`direction=inbound`, Caller-ID, angerufener Nummer und SIP Call-ID. Für eingehende
+Testanrufe gelten standardmäßig keine Commit- oder Kostenberechtigungen. Es stehen nur
+`record_fact` und `finish_call` zur Verfügung.
 
 ## 79. wait_until_answered
 
@@ -3852,6 +3879,10 @@ provider failover
 ## 167. Definition of Done v0.1
 
 - Telnyx Outbound funktioniert.
+- Telnyx Inbound funktioniert über dieselbe deutsche DID.
+- Inbound-Trunk und Individual Dispatch Rule werden idempotent gebootstrapped.
+- Inbound-Anrufe werden mit `direction=inbound` durable gespeichert.
+- Inbound-Anrufer erhalten keine verbindlichen, DTMF- oder HITL-Tools.
 - LiveKit SIP funktioniert bidirektional.
 - Gemini 3.1 Flash Live führt deutsches Telefongespräch.
 - thinkingLevel=minimal.
@@ -4248,6 +4279,10 @@ Job Lifecycle
 
 Outbound SIP Calls
 - <https://docs.livekit.io/telephony/making-calls/outbound-calls/>
+
+Inbound SIP Calls
+- <https://docs.livekit.io/telephony/accepting-calls/inbound-trunk/>
+- <https://docs.livekit.io/telephony/accepting-calls/dispatch-rule/>
 
 LiveKit Server Releases
 - <https://github.com/livekit/livekit/releases>

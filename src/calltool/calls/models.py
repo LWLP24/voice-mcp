@@ -31,6 +31,11 @@ class CallStatus(StrEnum):
         return self in {self.COMPLETED, self.FAILED, self.CANCELLED}
 
 
+class CallDirection(StrEnum):
+    OUTBOUND = "outbound"
+    INBOUND = "inbound"
+
+
 class CallPhase(StrEnum):
     OPENING = "opening"
     IDENTIFYING = "identifying"
@@ -114,6 +119,7 @@ class CallError(BaseModel):
 class CallRecord(BaseModel):
     id: str
     principal_id: str
+    direction: CallDirection = CallDirection.OUTBOUND
     client_request_id: str | None = None
     status: CallStatus
     phase: CallPhase | None = None

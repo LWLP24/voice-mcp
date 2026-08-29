@@ -13,6 +13,7 @@ from livekit.agents import llm
 from calltool.calls.ids import new_id
 from calltool.calls.models import (
     ActiveCallState,
+    CallDirection,
     CallOutcome,
     CallStatus,
     Candidate,
@@ -41,7 +42,11 @@ class ToolRuntime:
         return call.state
 
 
-def build_tools(runtime: ToolRuntime) -> list[llm.Tool | llm.Toolset]:
+def build_tools(
+    runtime: ToolRuntime,
+    *,
+    direction: CallDirection = CallDirection.OUTBOUND,
+) -> list[llm.Tool | llm.Toolset]:
     @llm.function_tool(description="Speichert ein vom Gesprächspartner bestätigtes Faktum.")
     async def record_fact(key: str, value: Any) -> dict[str, Any]:
         started = time.perf_counter()
@@ -108,13 +113,9 @@ def build_tools(runtime: ToolRuntime) -> list[llm.Tool | llm.Toolset]:
                 separators=(",", ":"),
                 ensure_ascii=False,
             )
-            digest = hashlib.sha256(
-                f"{call.id}:{canonical}".encode()
-            ).hexdigest()[:26].upper()
+            digest = hashlib.sha256(f"{call.id}:{canonical}".encode()).hexdigest()[:26].upper()
             commit_id = f"commit_{digest}"
-            existing = next(
-                (item for item in call.state.commitments if item.id == commit_id), None
-            )
+            existing = next((item for item in call.state.commitments if item.id == commit_id), None)
             if existing is not None:
                 return {
                     "allowed": existing.allowed,
@@ -146,9 +147,7 @@ def build_tools(runtime: ToolRuntime) -> list[llm.Tool | llm.Toolset]:
             )
             return decision.model_dump(mode="json")
         finally:
-            TOOL_LATENCY.labels(tool="authorize_commit").observe(
-                time.perf_counter() - started
-            )
+            TOOL_LATENCY.labels(tool="authorize_commit").observe(time.perf_counter() - started)
 
     @llm.function_tool(
         description="Fragt den Auftraggeber nach einer fehlenden Entscheidung und wartet auf Antwort."
@@ -168,9 +167,7 @@ def build_tools(runtime: ToolRuntime) -> list[llm.Tool | llm.Toolset]:
                     return {"status": "timeout"}
                 await asyncio.sleep(0.25)
         finally:
-            TOOL_LATENCY.labels(tool="request_user_input").observe(
-                time.perf_counter() - started
-            )
+            TOOL_LATENCY.labels(tool="request_user_input").observe(time.perf_counter() - started)
 
     @llm.function_tool(description="Sendet DTMF-Ziffern an ein Telefonmenü.")
     async def send_dtmf(digits: str) -> dict[str, Any]:
@@ -226,6 +223,9 @@ def build_tools(runtime: ToolRuntime) -> list[llm.Tool | llm.Toolset]:
             return {"accepted": True, "hangup_after_goodbye": True}
         finally:
             TOOL_LATENCY.labels(tool="finish_call").observe(time.perf_counter() - started)
+
+    if direction is CallDirection.INBOUND:
+        return [record_fact, finish_call]
 
     return [
         record_fact,

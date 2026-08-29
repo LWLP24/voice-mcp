@@ -6,11 +6,18 @@ from contextlib import suppress
 from typing import Any
 
 import structlog
-from livekit import api
+from livekit import api, rtc
 from livekit.agents import AutoSubscribe, JobContext
 
+from calltool.api.auth import principal_for_api_key
 from calltool.calls.dispatcher import NullCallDispatcher
-from calltool.calls.models import CallError, CallOutcome, CallPhase, CallStatus
+from calltool.calls.models import (
+    CallDirection,
+    CallError,
+    CallOutcome,
+    CallPhase,
+    CallStatus,
+)
 from calltool.calls.service import CallService
 from calltool.config import Settings
 from calltool.policy.engine import PolicyEngine
@@ -28,10 +35,14 @@ logger = structlog.get_logger(__name__)
 
 
 async def handle_call(ctx: JobContext, settings: Settings) -> None:
-    metadata = json.loads(ctx.job.metadata or "{}")
+    metadata = _job_metadata(ctx.job.metadata)
+    inbound = metadata.get("direction") == CallDirection.INBOUND.value
     call_id = metadata.get("call_id")
-    if not isinstance(call_id, str):
+    if not inbound and not isinstance(call_id, str):
         ctx.shutdown("missing call_id in dispatch metadata")
+        return
+    if inbound and not settings.config.calls.inbound.enabled:
+        ctx.shutdown("inbound calls disabled")
         return
 
     events = build_event_dispatcher(
@@ -40,9 +51,7 @@ async def handle_call(ctx: JobContext, settings: Settings) -> None:
         webhook_signing_secret=settings.WEBHOOK_SIGNING_SECRET.get_secret_value(),
         queue_size=settings.config.performance.event_queue_size,
     )
-    repository = await PostgresCallRepository.connect(
-        settings.DATABASE_URL, event_publisher=events
-    )
+    repository = await PostgresCallRepository.connect(settings.DATABASE_URL, event_publisher=events)
     service = CallService(
         repository,
         NullCallDispatcher(),
@@ -51,19 +60,46 @@ async def handle_call(ctx: JobContext, settings: Settings) -> None:
     )
     supervisor = GeminiSupervisor(settings)
     observer: SessionObserver | None = None
+    greeting_task: asyncio.Task[rtc.AudioFrame] | None = None
     try:
-        call = await repository.get_call(call_id)
-        if call is None or call.status.terminal:
-            ctx.shutdown("call no longer active")
-            return
-
-        call = await repository.update_call(
-            call.id,
-            status=CallStatus.PREWARMING,
-            event_type="call.prewarming",
-            expected_statuses={CallStatus.QUEUED},
-        )
-        await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
+        if inbound:
+            await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
+            participant = await ctx.wait_for_participant()
+            if participant.kind != rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
+                ctx.shutdown("inbound participant is not SIP")
+                return
+            attributes = participant.attributes
+            call = await service.create_inbound_call(
+                caller_number=attributes.get("sip.phoneNumber", "anonymous"),
+                called_number=attributes.get("sip.trunkPhoneNumber", settings.TELNYX_FROM_NUMBER),
+                sip_participant_identity=participant.identity,
+                room_name=ctx.room.name,
+                sip_call_id=attributes.get("sip.callIDFull") or attributes.get("sip.callID"),
+                principal_id=principal_for_api_key(settings.CALLTOOL_API_KEY.get_secret_value()),
+            )
+            call_id = call.id
+            if call.status is not CallStatus.CONNECTED:
+                ctx.shutdown("inbound call already handled")
+                return
+            logger.info(
+                "inbound call accepted",
+                call_id=call.id,
+                room_name=ctx.room.name,
+                sip_call_id=attributes.get("sip.callID"),
+            )
+        else:
+            assert isinstance(call_id, str)
+            stored_call = await repository.get_call(call_id)
+            if stored_call is None or stored_call.status.terminal:
+                ctx.shutdown("call no longer active")
+                return
+            call = await repository.update_call(
+                stored_call.id,
+                status=CallStatus.PREWARMING,
+                event_type="call.prewarming",
+                expected_statuses={CallStatus.QUEUED},
+            )
+            await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
 
         finish_event = asyncio.Event()
         tool_runtime = ToolRuntime(
@@ -74,57 +110,77 @@ async def handle_call(ctx: JobContext, settings: Settings) -> None:
             room=ctx.room,
             finish_event=finish_event,
         )
-        tools = build_tools(tool_runtime)
+        tools = build_tools(tool_runtime, direction=call.direction)
         voice = build_voice_runtime(call, settings, tools)
         greeting = greeting_for(call)
         greeting_task = asyncio.create_task(pre_synthesize(voice.scripted_tts, greeting))
 
-        participant_identity = f"callee-{call.id.removeprefix('call_').lower()}"
-        state = call.state.model_copy(update={"sip_participant_identity": participant_identity})
-        call = await repository.update_call(
-            call.id,
-            status=CallStatus.DIALING,
-            state=state,
-            event_type="call.dialing",
-            expected_statuses={CallStatus.PREWARMING},
-        )
-        dial_task = asyncio.create_task(dial_call(ctx, call, settings))
-        call = await repository.update_call(
-            call.id,
-            status=CallStatus.RINGING,
-            event_type="call.ringing",
-            expected_statuses={CallStatus.DIALING},
-        )
-        try:
-            await dial_task
-        except api.SipCallError as exc:
-            code, retryable = sip_error(exc)
-            await repository.update_call(
+        if not inbound:
+            participant_identity = f"callee-{call.id.removeprefix('call_').lower()}"
+            state = call.state.model_copy(update={"sip_participant_identity": participant_identity})
+            call = await repository.update_call(
                 call.id,
-                status=CallStatus.FAILED,
-                error=CallError(
-                    code=code,
-                    message=f"SIP {exc.sip_status_code}: {exc.sip_status}",
-                    retryable=retryable,
-                ),
-                event_type="call.failed",
-                event_payload={"code": code, "sip_status_code": exc.sip_status_code},
+                status=CallStatus.DIALING,
+                state=state,
+                event_type="call.dialing",
+                expected_statuses={CallStatus.PREWARMING},
+            )
+            dial_task = asyncio.create_task(dial_call(ctx, call, settings))
+            call = await repository.update_call(
+                call.id,
+                status=CallStatus.RINGING,
+                event_type="call.ringing",
+                expected_statuses={CallStatus.DIALING},
+            )
+            try:
+                await dial_task
+            except api.SipCallError as exc:
+                code, retryable = sip_error(exc)
+                await repository.update_call(
+                    call.id,
+                    status=CallStatus.FAILED,
+                    error=CallError(
+                        code=code,
+                        message=f"SIP {exc.sip_status_code}: {exc.sip_status}",
+                        retryable=retryable,
+                    ),
+                    event_type="call.failed",
+                    event_payload={
+                        "code": code,
+                        "sip_status_code": exc.sip_status_code,
+                    },
+                    expected_statuses={CallStatus.RINGING},
+                )
+                greeting_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await greeting_task
+                ctx.shutdown(code)
+                return
+
+            participant = await ctx.wait_for_participant(identity=participant_identity)
+            call = await repository.update_call(
+                call.id,
+                status=CallStatus.CONNECTED,
+                phase=CallPhase.OPENING,
+                event_type="call.connected",
+                event_payload={"direction": CallDirection.OUTBOUND.value},
                 expected_statuses={CallStatus.RINGING},
             )
-            greeting_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await greeting_task
-            ctx.shutdown(code)
-            return
 
-        participant = await ctx.wait_for_participant(identity=participant_identity)
-        call = await repository.update_call(
-            call.id,
-            status=CallStatus.CONNECTED,
-            phase=CallPhase.OPENING,
-            event_type="call.connected",
-            expected_statuses={CallStatus.RINGING},
-        )
+        disconnected = asyncio.Event()
+
+        @ctx.room.on("participant_disconnected")
+        def on_participant_disconnected(remote: Any) -> None:
+            if remote.identity == participant.identity:
+                disconnected.set()
+
+        @ctx.room.on("disconnected")
+        def on_room_disconnected(*_: Any) -> None:
+            disconnected.set()
+
+        if participant.identity not in ctx.room.remote_participants:
+            disconnected.set()
+
         await voice.session.start(
             agent=voice.agent,
             room=ctx.room,
@@ -156,17 +212,6 @@ async def handle_call(ctx: JobContext, settings: Settings) -> None:
             expected_statuses={CallStatus.CONNECTED},
         )
 
-        disconnected = asyncio.Event()
-
-        @ctx.room.on("participant_disconnected")
-        def on_participant_disconnected(remote: Any) -> None:
-            if remote.identity == participant.identity:
-                disconnected.set()
-
-        @ctx.room.on("disconnected")
-        def on_room_disconnected(*_: Any) -> None:
-            disconnected.set()
-
         greeting_audio = await greeting_task
         await voice.session.say(
             greeting,
@@ -174,9 +219,7 @@ async def handle_call(ctx: JobContext, settings: Settings) -> None:
             allow_interruptions=True,
         )
 
-        end_reason = await _wait_for_call_end(
-            disconnected, finish_event, watchdog_unrecoverable
-        )
+        end_reason = await _wait_for_call_end(disconnected, finish_event, watchdog_unrecoverable)
         if end_reason == "finish":
             with suppress(TimeoutError):
                 async with asyncio.timeout(15):
@@ -207,27 +250,40 @@ async def handle_call(ctx: JobContext, settings: Settings) -> None:
         ctx.shutdown("call completed")
     except Exception as exc:
         logger.exception("call worker failed", call_id=call_id)
-        current = await repository.get_call(call_id)
-        if current is not None and not current.status.terminal:
-            with suppress(Exception):
-                await repository.update_call(
-                    call_id,
-                    status=CallStatus.FAILED,
-                    error=CallError(
-                        code="worker_failure",
-                        message=str(exc),
-                        retryable=False,
-                    ),
-                    event_type="call.failed",
-                    event_payload={"code": "worker_failure"},
-                    expected_statuses={current.status},
-                )
+        if isinstance(call_id, str):
+            current = await repository.get_call(call_id)
+            if current is not None and not current.status.terminal:
+                with suppress(Exception):
+                    await repository.update_call(
+                        call_id,
+                        status=CallStatus.FAILED,
+                        error=CallError(
+                            code="worker_failure",
+                            message=str(exc),
+                            retryable=False,
+                        ),
+                        event_type="call.failed",
+                        event_payload={"code": "worker_failure"},
+                        expected_statuses={current.status},
+                    )
         ctx.shutdown("worker failure")
     finally:
+        if greeting_task is not None and not greeting_task.done():
+            greeting_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await greeting_task
         if observer is not None:
             await observer.close()
         await supervisor.close()
         await service.close()
+
+
+def _job_metadata(raw_metadata: str | None) -> dict[str, Any]:
+    try:
+        parsed = json.loads(raw_metadata or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 async def _wait_for_call_end(
@@ -246,6 +302,7 @@ async def _wait_for_call_end(
     await asyncio.gather(*pending, return_exceptions=True)
     return waiters[next(iter(done))]
 
+
 async def _complete_call(
     repository: PostgresCallRepository, supervisor: GeminiSupervisor, call_id: str
 ) -> None:
@@ -254,13 +311,18 @@ async def _complete_call(
         return
     if call.outcome is None:
         confirmed = [item for item in call.state.commitments if item.allowed and item.confirmed]
+        inbound = call.direction is CallDirection.INBOUND
         outcome = CallOutcome(
-            success=bool(confirmed),
+            success=inbound or bool(confirmed),
             reason="remote_hangup",
             summary=(
-                "Gespräch beendet; verbindliche Zusage wurde erfasst."
-                if confirmed
-                else "Gespräch wurde ohne verbindliche Zusage beendet."
+                "Eingehendes Gespräch wurde beendet."
+                if inbound
+                else (
+                    "Gespräch beendet; verbindliche Zusage wurde erfasst."
+                    if confirmed
+                    else "Gespräch wurde ohne verbindliche Zusage beendet."
+                )
             ),
             facts=call.state.facts,
             commitments=call.state.commitments,

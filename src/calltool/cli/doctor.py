@@ -85,6 +85,58 @@ async def run(call_number: str | None = None) -> int:
             else "address, credentials, or caller number missing",
         )
     )
+    if settings.config.calls.inbound.enabled:
+        inbound_client: api.LiveKitAPI | None = None
+        try:
+            inbound_client = api.LiveKitAPI(
+                url=settings.LIVEKIT_URL,
+                api_key=settings.LIVEKIT_API_KEY,
+                api_secret=settings.LIVEKIT_API_SECRET.get_secret_value(),
+            )
+            trunks = await inbound_client.sip.list_sip_inbound_trunk(
+                api.ListSIPInboundTrunkRequest(numbers=[settings.TELNYX_FROM_NUMBER])
+            )
+            trunk = next(
+                (
+                    item
+                    for item in trunks.items
+                    if item.name == "CallTool Telnyx Inbound"
+                    and settings.TELNYX_FROM_NUMBER in item.numbers
+                ),
+                None,
+            )
+            if trunk is None:
+                checks.append(
+                    Check(
+                        "LiveKit inbound routing",
+                        False,
+                        "inbound trunk missing; run calltool sip bootstrap",
+                    )
+                )
+            else:
+                rules = await inbound_client.sip.list_sip_dispatch_rule(
+                    api.ListSIPDispatchRuleRequest(trunk_ids=[trunk.sip_trunk_id])
+                )
+                dispatch = next(
+                    (item for item in rules.items if item.name == "CallTool Telnyx Inbound"),
+                    None,
+                )
+                checks.append(
+                    Check(
+                        "LiveKit inbound routing",
+                        dispatch is not None,
+                        (
+                            f"trunk {trunk.sip_trunk_id}, dispatch {dispatch.sip_dispatch_rule_id}"
+                            if dispatch is not None
+                            else f"trunk {trunk.sip_trunk_id}, dispatch rule missing"
+                        ),
+                    )
+                )
+        except Exception as exc:
+            checks.append(Check("LiveKit inbound routing", False, str(exc)))
+        finally:
+            if inbound_client is not None:
+                await inbound_client.aclose()
     checks.append(
         Check(
             "Gemini Live",
@@ -92,9 +144,7 @@ async def run(call_number: str | None = None) -> int:
             settings.config.voice.realtime.model,
         )
     )
-    checks.append(
-        Check("Gemini supervisor", True, settings.config.voice.supervisor.model)
-    )
+    checks.append(Check("Gemini supervisor", True, settings.config.voice.supervisor.model))
     checks.append(Check("Gemini TTS", True, settings.config.voice.scripted_tts.model))
     checks.append(
         Check(

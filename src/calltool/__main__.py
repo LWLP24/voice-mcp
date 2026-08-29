@@ -21,7 +21,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     sip = commands.add_parser("sip", help="Manage the LiveKit SIP integration")
     sip_commands = sip.add_subparsers(dest="sip_command", required=True)
-    sip_commands.add_parser("bootstrap", help="Create or find the Telnyx outbound trunk")
+    sip_commands.add_parser(
+        "bootstrap", help="Create or find the Telnyx inbound and outbound SIP setup"
+    )
     return parser
 
 

@@ -3,6 +3,7 @@ import pytest
 from calltool.calls.dispatcher import NullCallDispatcher
 from calltool.calls.models import (
     CallCreateRequest,
+    CallDirection,
     CallPermissions,
     CallStatus,
     CallTarget,
@@ -11,6 +12,7 @@ from calltool.calls.service import CallService
 from calltool.config import CallsConfig, FileConfig, Settings
 from calltool.policy.engine import PolicyEngine
 from calltool.storage.memory import MemoryCallRepository
+from calltool.voice.prompts import compile_call_prompt, greeting_for
 
 
 def make_settings(max_concurrent: int = 2) -> Settings:
@@ -117,3 +119,51 @@ async def test_human_input_roundtrip() -> None:
     resolved = await repository.get_input_request(input_request.id)
     assert resolved is not None
     assert resolved.response == {"choice": "accept"}
+
+
+@pytest.mark.asyncio
+async def test_inbound_call_is_connected_safe_and_idempotent() -> None:
+    settings = make_settings()
+    repository = MemoryCallRepository()
+    service = CallService(
+        repository,
+        NullCallDispatcher(),
+        PolicyEngine(settings.config.policy),
+        settings,
+    )
+
+    first = await service.create_inbound_call(
+        caller_number="+491701234567",
+        called_number="+49301234567",
+        sip_participant_identity="sip-caller",
+        room_name="calltool-inbound-test",
+        sip_call_id="telnyx-call-id",
+        principal_id="user",
+    )
+    second = await service.create_inbound_call(
+        caller_number="+491701234567",
+        called_number="+49301234567",
+        sip_participant_identity="sip-caller",
+        room_name="calltool-inbound-test",
+        sip_call_id="telnyx-call-id",
+        principal_id="user",
+    )
+
+    assert second.id == first.id
+    assert first.direction is CallDirection.INBOUND
+    assert first.status is CallStatus.CONNECTED
+    assert first.connected_at is not None
+    assert first.request.permissions.may_commit is False
+    assert first.request.permissions.may_accept_costs is False
+    assert first.state.room_name == "calltool-inbound-test"
+    assert greeting_for(first) == (
+        "Guten Tag, hier ist der KI-Assistent von LWLP. Wie kann ich Ihnen helfen?"
+    )
+    prompt = compile_call_prompt(first)
+    assert "nimmst einen eingehenden Anruf für LWLP entgegen" in prompt
+    assert "authorize_commit" not in prompt
+    assert "send_dtmf" not in prompt
+    assert [event.type for event in await repository.list_events(first.id)] == [
+        "call.created",
+        "call.connected",
+    ]

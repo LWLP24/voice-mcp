@@ -30,7 +30,9 @@ _IN_PROGRESS = tuple(status.value for status in CallStatus if not status.termina
 
 def _load_migrations() -> list[str]:
     migration_dir = Path(__file__).resolve().parents[3] / "migrations"
-    return [migration.read_text(encoding="utf-8") for migration in sorted(migration_dir.glob("*.sql"))]
+    return [
+        migration.read_text(encoding="utf-8") for migration in sorted(migration_dir.glob("*.sql"))
+    ]
 
 
 def _json(value: Any) -> str:
@@ -42,9 +44,7 @@ def _decoded(value: Any) -> Any:
 
 
 class PostgresCallRepository:
-    def __init__(
-        self, pool: asyncpg.Pool, event_publisher: EventPublisher | None = None
-    ) -> None:
+    def __init__(self, pool: asyncpg.Pool, event_publisher: EventPublisher | None = None) -> None:
         self._pool = pool
         self._event_publisher = event_publisher
 
@@ -82,15 +82,16 @@ class PostgresCallRepository:
             await connection.execute(
                 """
                 INSERT INTO calls (
-                  id, principal_id, client_request_id, status, phase, target_number,
+                  id, principal_id, direction, client_request_id, status, phase, target_number,
                   request, state, outcome, error, created_at, updated_at, connected_at, ended_at
                 ) VALUES (
-                  $1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb,
-                  $10::jsonb, $11, $12, $13, $14
+                  $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10::jsonb,
+                  $11::jsonb, $12, $13, $14, $15
                 )
                 """,
                 call.id,
                 call.principal_id,
+                call.direction.value,
                 call.client_request_id,
                 call.status.value,
                 call.phase.value if call.phase else None,
@@ -315,9 +316,7 @@ class PostgresCallRepository:
         return request
 
     async def get_input_request(self, request_id: str) -> InputRequest | None:
-        row = await self._pool.fetchrow(
-            "SELECT * FROM input_requests WHERE id = $1", request_id
-        )
+        row = await self._pool.fetchrow("SELECT * FROM input_requests WHERE id = $1", request_id)
         return self._row_to_input_request(row) if row else None
 
     async def resolve_input_request(
@@ -342,9 +341,7 @@ class PostgresCallRepository:
             return existing
         return self._row_to_input_request(row)
 
-    async def expire_input_request(
-        self, call_id: str, request_id: str
-    ) -> InputRequest:
+    async def expire_input_request(self, call_id: str, request_id: str) -> InputRequest:
         row = await self._pool.fetchrow(
             """
             UPDATE input_requests SET status = 'expired', resolved_at = $3
@@ -373,6 +370,7 @@ class PostgresCallRepository:
             {
                 "id": row["id"],
                 "principal_id": row["principal_id"],
+                "direction": row["direction"],
                 "client_request_id": row["client_request_id"],
                 "status": row["status"],
                 "phase": row["phase"],

@@ -2,15 +2,50 @@ from __future__ import annotations
 
 import json
 
-from calltool.calls.models import CallRecord
+from calltool.calls.models import CallDirection, CallRecord
 
 
 def compile_call_prompt(call: CallRecord) -> str:
     request = call.request
     disclosure = request.permissions.may_disclose
+    if call.direction is CallDirection.INBOUND:
+        identity = (
+            "Du bist ein Telefon-KI-Agent und nimmst einen eingehenden Anruf für "
+            f"{request.context.get('organization_name', 'LWLP')} entgegen.\n"
+            "Lege zu Beginn kurz und natürlich offen, dass du ein KI-Assistent bist."
+        )
+        target = (
+            f"Anrufer: {request.target.phone_number}\n"
+            f"Angerufene Nummer: {request.context.get('called_number', 'unbekannt')}"
+        )
+        tool_instructions = """record_fact speichert bestätigte Fakten aus dem Anliegen.
+finish_call beendet das Gespräch mit einem strukturierten Ergebnis.
+Du darfst keine verbindlichen Zusagen, Buchungen oder kostenpflichtigen Handlungen
+vornehmen. Biete stattdessen an, das Anliegen aufzunehmen."""
+        slow_tool_rule = "Lokale Tools benötigen keine Wartephrase."
+    else:
+        identity = (
+            "Du bist ein Telefon-KI-Agent und handelst im Auftrag des Anrufers.\n"
+            "Lege zu Beginn kurz und natürlich offen, dass du ein KI-Assistent bist."
+        )
+        target = (
+            f"Name: {request.target.name or 'unbekannt'}\n"
+            f"Telefonnummer: {request.target.phone_number}"
+        )
+        tool_instructions = """record_fact speichert bestätigte Fakten.
+propose_candidate prüft Vorschläge unverbindlich gegen Regeln.
+authorize_commit ist vor jeder verbindlichen Zusage zwingend erforderlich.
+request_user_input fragt den Auftraggeber, wenn eine Entscheidung fehlt.
+send_dtmf bedient ein Telefonmenü.
+finish_call beendet den Auftrag mit einem strukturierten Ergebnis.
+Erfinde keine persönlichen Informationen. Verwende keine verbindliche Formulierung,
+bevor authorize_commit allowed=true geliefert hat."""
+        slow_tool_rule = (
+            "Sage vor request_user_input kurz, dass du etwas prüfst. "
+            "Lokale Tools benötigen keine Wartephrase."
+        )
     return f"""IDENTITY
-Du bist ein Telefon-KI-Agent und handelst im Auftrag des Anrufers.
-Lege zu Beginn kurz und natürlich offen, dass du ein KI-Assistent bist.
+{identity}
 
 STYLE
 Sprich natürlich, freundlich und knapp auf Deutsch.
@@ -19,8 +54,7 @@ Halte keine Monologe, erzähle keine internen Gedankengänge und wiederhole nich
 Unterbrich deine Ausgabe sofort, wenn dein Gesprächspartner spricht.
 
 TARGET
-Name: {request.target.name or "unbekannt"}
-Telefonnummer: {request.target.phone_number}
+{target}
 
 GOAL
 {request.objective}
@@ -38,17 +72,10 @@ may_disclose={json.dumps(disclosure, ensure_ascii=False)}
 Gib nur Daten weiter, die in may_disclose ausdrücklich erlaubt sind.
 
 TOOLS
-record_fact speichert bestätigte Fakten.
-propose_candidate prüft Vorschläge unverbindlich gegen Regeln.
-authorize_commit ist vor jeder verbindlichen Zusage zwingend erforderlich.
-request_user_input fragt den Auftraggeber, wenn eine Entscheidung fehlt.
-send_dtmf bedient ein Telefonmenü.
-finish_call beendet den Auftrag mit einem strukturierten Ergebnis.
-Erfinde keine persönlichen Informationen. Verwende keine verbindliche Formulierung,
-bevor authorize_commit allowed=true geliefert hat.
+{tool_instructions}
 
 SLOW TOOL RULE
-Sage vor request_user_input kurz, dass du etwas prüfst. Lokale Tools benötigen keine Wartephrase.
+{slow_tool_rule}
 
 CALL END
 Wiederhole verbindliche Daten wie Datum, Uhrzeit, Preis oder Telefonnummer genau einmal.
@@ -57,6 +84,11 @@ Beende das Gespräch höflich und rufe danach finish_call auf.
 
 
 def greeting_for(call: CallRecord) -> str:
+    if call.direction is CallDirection.INBOUND:
+        greeting = call.request.context.get("inbound_greeting")
+        if isinstance(greeting, str) and greeting.strip():
+            return greeting.strip()
+        return "Guten Tag, hier ist ein KI-Assistent. Wie kann ich Ihnen helfen?"
     caller_name = call.request.context.get("caller_name")
     representation = f" im Auftrag von {caller_name}" if caller_name else " im Auftrag eines Kunden"
     return (

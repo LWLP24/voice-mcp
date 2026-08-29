@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from datetime import timedelta
 
 from calltool.calls.dispatcher import CallDispatcher
@@ -14,11 +15,14 @@ from calltool.calls.ids import new_id
 from calltool.calls.models import (
     ActiveCallState,
     CallCreateRequest,
+    CallDirection,
     CallError,
     CallEvent,
+    CallPermissions,
     CallPhase,
     CallRecord,
     CallStatus,
+    CallTarget,
     InputRequest,
     utc_now,
 )
@@ -84,6 +88,82 @@ class CallService:
         await self.dispatch_queued()
         return await self.get_call(call.id, principal_id=principal_id)
 
+    async def create_inbound_call(
+        self,
+        *,
+        caller_number: str,
+        called_number: str,
+        sip_participant_identity: str,
+        room_name: str,
+        sip_call_id: str | None,
+        principal_id: str,
+    ) -> CallRecord:
+        """Persist an already-connected inbound SIP participant as a normal call."""
+        inbound = self._settings.config.calls.inbound
+        caller_number = caller_number.strip()[:64] or "anonymous"
+        called_number = called_number.strip()[:64] or "unknown"
+        client_request_id = None
+        if sip_call_id:
+            digest = hashlib.sha256(sip_call_id.encode()).hexdigest()
+            client_request_id = f"inbound:{digest}"
+            existing = await self._repository.get_by_idempotency(principal_id, client_request_id)
+            if existing is not None:
+                return existing
+
+        context = {
+            "direction": CallDirection.INBOUND.value,
+            "caller_number": caller_number,
+            "called_number": called_number,
+            "organization_name": inbound.organization_name,
+            "inbound_greeting": inbound.greeting,
+        }
+        if sip_call_id:
+            context["sip_call_id"] = sip_call_id[:256]
+        request = CallCreateRequest(
+            target=CallTarget(phone_number=caller_number, name="Eingehender Anrufer"),
+            objective=inbound.objective,
+            constraints=inbound.constraints,
+            context=context,
+            permissions=CallPermissions(),
+            client_request_id=client_request_id,
+        )
+        now = utc_now()
+        call = CallRecord(
+            id=new_id("call"),
+            principal_id=principal_id,
+            direction=CallDirection.INBOUND,
+            client_request_id=client_request_id,
+            status=CallStatus.CREATED,
+            target_number=caller_number,
+            request=request,
+            state=ActiveCallState(
+                objective=request.objective,
+                constraints=request.constraints,
+                permissions=request.permissions,
+                facts={"called_number": called_number},
+                room_name=room_name,
+                sip_participant_identity=sip_participant_identity,
+            ),
+            created_at=now,
+            updated_at=now,
+        )
+        created_id = call.id
+        call = await self._repository.create_call(call)
+        if call.id != created_id:
+            return call
+        return await self._repository.update_call(
+            call.id,
+            status=CallStatus.CONNECTED,
+            phase=CallPhase.OPENING,
+            event_type="call.connected",
+            event_payload={
+                "direction": CallDirection.INBOUND.value,
+                "room_name": room_name,
+                "sip_call_id": sip_call_id or "",
+            },
+            expected_statuses={CallStatus.CREATED},
+        )
+
     async def dispatch_queued(self) -> int:
         """Fill free call slots while leaving excess requests durably queued."""
         dispatched = 0
@@ -113,9 +193,7 @@ class CallService:
                     await self._repository.update_call(
                         call.id,
                         status=CallStatus.FAILED,
-                        error=CallError(
-                            code="dispatch_failed", message=str(exc), retryable=True
-                        ),
+                        error=CallError(code="dispatch_failed", message=str(exc), retryable=True),
                         event_type="call.failed",
                         event_payload={"code": "dispatch_failed"},
                         expected_statuses={CallStatus.QUEUED},
@@ -171,9 +249,7 @@ class CallService:
             expected_statuses={CallStatus.INPUT_REQUIRED},
         )
 
-    async def request_input(
-        self, call_id: str, question: str, options: list[str]
-    ) -> InputRequest:
+    async def request_input(self, call_id: str, question: str, options: list[str]) -> InputRequest:
         call = await self.get_call(call_id)
         request = InputRequest(
             id=new_id("input"),

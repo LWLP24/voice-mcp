@@ -8,7 +8,8 @@ bridge. Telnyx and LiveKit both document this integration directly.
 - A paid Telnyx account
 - An activated German Telnyx phone number
 - A Telnyx Outbound Voice Profile with conversational traffic and the global service plan
-- A Telnyx FQDN SIP Connection with outbound username/password authentication
+- A Telnyx FQDN SIP Connection with outbound username/password authentication and
+  inbound routing to LiveKit SIP
 - A public server for LiveKit, LiveKit SIP, CallTool, PostgreSQL, Redis, and Caddy
 - Google Gemini API credentials
 
@@ -49,7 +50,8 @@ In the Telnyx Mission Control Portal:
 5. Select TCP, the European SIP region, and either latency-based anchoring or Frankfurt.
 6. Link the Outbound Voice Profile to the connection.
 7. Add the public LiveKit SIP hostname and port `5060` to the FQDN connection.
-8. Assign the German phone number to that connection.
+8. Set the inbound destination number format to `+E.164`.
+9. Assign the German phone number to that connection.
 
 CallTool sends destinations and caller IDs in `+E.164`. Keep the Telnyx destination and
 origination number formats on `+E.164`. The configured caller number must belong to the
@@ -80,6 +82,12 @@ LIVEKIT_SIP_TRUNK_ID=
 `sip.telnyx.eu` keeps SIP signaling in the European Telnyx region. The connection's
 AnchorSite controls media placement separately.
 
+Inbound behavior is configured in `config/calltool.yaml` under `calls.inbound`. It is
+enabled by default with an LWLP test greeting, no commitment/cost permissions, and an
+allowlist for the two European Telnyx SIP signaling proxies currently documented at
+`sip.telnyx.com`. If the selected Telnyx SIP region changes, update `allowed_addresses`
+before running the bootstrap again.
+
 ## 4. Start and bootstrap
 
 Start the infrastructure:
@@ -88,16 +96,18 @@ Start the infrastructure:
 docker compose up -d
 ```
 
-Create the reusable LiveKit outbound trunk:
+Create the reusable LiveKit outbound trunk, inbound trunk, and dispatch rule:
 
 ```bash
 docker compose run --rm calltool-api sip bootstrap
 ```
 
-The bootstrap uses TCP, SIP digest credentials, `destination_country=DE`, and the
-`X-Telnyx-Username` header required to select the correct Telnyx credential connection on
-the first INVITE. Copy the returned trunk ID into `.env` as `LIVEKIT_SIP_TRUNK_ID`, then
-apply it:
+For outbound calls, the bootstrap uses TCP, SIP digest credentials,
+`destination_country=DE`, and the `X-Telnyx-Username` header required to select the
+correct Telnyx credential connection on the first INVITE. For inbound calls, it creates a
+number-specific trunk restricted to the European Telnyx signaling proxies and a dispatch
+rule that starts the `calltool` agent in a dedicated room for every caller. Copy the
+returned outbound trunk ID into `.env` as `LIVEKIT_SIP_TRUNK_ID`, then apply it:
 
 ```bash
 docker compose up -d --force-recreate calltool-api calltool-worker
@@ -111,11 +121,33 @@ Run the dependency checks first:
 docker compose run --rm calltool-api doctor
 ```
 
-Then place an explicit diagnostic call to a number you control:
+The doctor also verifies that the inbound trunk and its dispatch rule exist. Then place an
+explicit outbound diagnostic call to a number you control:
 
 ```bash
 docker compose run --rm calltool-api doctor --call +49...
 ```
+
+For the first inbound test, follow the worker logs and call the configured Telnyx number
+from a second phone:
+
+```bash
+docker compose logs -f calltool-worker livekit-sip
+```
+
+The caller should hear the configured disclosure and greeting. The worker log entry
+`inbound call accepted` contains the durable `call_id`. With the same API key used by the
+service, inspect the result while or after the call:
+
+```bash
+curl -H "Authorization: Bearer <CALLTOOL_API_KEY>" \
+  https://<CALLTOOL_DOMAIN>/v1/calls/<call_id>
+```
+
+Inbound callers only receive the `record_fact` and `finish_call` tools. They cannot make
+commitments, accept costs, send DTMF, or trigger human-in-the-loop requests. LiveKit's
+individual dispatch rule can include the caller number in the generated room name, so
+treat room names and related logs as personal data during testing.
 
 For SIP failures, inspect both `docker compose logs livekit-sip calltool-worker` and the
 Telnyx SIP call-flow debugger. Common setup errors are a wrong caller ID, a number not
@@ -126,6 +158,8 @@ address, or blocked RTP ports.
 
 - [LiveKit Telnyx setup](https://docs.livekit.io/telephony/start/providers/telnyx/)
 - [LiveKit outbound trunks](https://docs.livekit.io/telephony/making-calls/outbound-trunk/)
+- [LiveKit inbound trunks](https://docs.livekit.io/telephony/accepting-calls/inbound-trunk/)
+- [LiveKit inbound dispatch rules](https://docs.livekit.io/telephony/accepting-calls/dispatch-rule/)
 - [Telnyx LiveKit configuration](https://developers.telnyx.com/docs/voice/sip-trunking/livekit-configuration-guide)
 - [Telnyx SIP regions and ports](https://sip.telnyx.com/)
 - [German DID requirements](https://support.telnyx.com/en/articles/1311450-germany-did-requirements)
