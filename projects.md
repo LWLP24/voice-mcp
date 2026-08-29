@@ -4,9 +4,10 @@
 
 Universeller, self-hostbarer Telefon-Agent als MCP-/REST-Tool
 
-Optimiert auf natürliche Gespräche, minimale Latenz und aktuelle Google-Voice-Modelle
+Optimiert auf natürliche Gespräche, minimale Latenz und austauschbare native
+Realtime-Voice-Modelle von Google und OpenAI
 
-Stand der technischen Verifikation: 28. August 2026
+Stand der technischen Verifikation: 29. August 2026
 Architekturstatus: empfohlene Implementierungsbasis
 Primäres Ziel: Ein beliebiger AI-Agent soll per MCP oder REST einen Telefonauftrag starten können. Der Telefon-Agent soll sich auf normalem menschlichem Gesprächsniveau anfühlen: geringe Antwortlatenz, saubere Unterbrechungen, keine langen künstlichen Pausen und trotzdem kontrollierbare Aktionen.
 
@@ -64,7 +65,7 @@ Der normale Gesprächspfad ist bewusst so kurz wie möglich:
 Telefon-Audio
      │
      ▼
-Gemini 3.1 Flash Live
+Gemini 3.1 Flash Live oder GPT-Realtime-2.1
      │
      ▼
 Telefon-Audio
@@ -99,6 +100,38 @@ Gemini 3.1 Flash TTS
           ↓
 exakte scripted speech / Fallback
 ```
+
+### 0.1 Implementierte Realtime-Provider-Auswahl
+
+Gemini bleibt die voreingestellte und in den folgenden Kapiteln ausführlich beschriebene
+Architektur. Der Realtime-Hot-Path kann inzwischen pro Installation oder pro ausgehendem
+Anruf auch über OpenAI laufen:
+
+```text
+gemini-3.1-flash-live-preview
+gpt-realtime-2.1
+gpt-realtime-2.1-mini
+```
+
+`gpt-realtime-2.1-mini` ist die offizielle schnellere und günstigere Variante. Ein Modell
+namens `gpt-realtime-2.1-flash` existiert nicht und wird deshalb bewusst nicht als Alias
+akzeptiert. Provider, Modell, Sprache und Stimme sind in `config/calltool.yaml`, über
+`CALLTOOL_VOICE_*` in `.env` und als `voice`-Objekt eines einzelnen REST-/MCP-Auftrags
+konfigurierbar. Die Priorität lautet:
+
+```text
+Auftragsparameter → Umgebungsvariable → YAML-Standard
+```
+
+Sprachen werden als BCP-47-Tag wie `de`, `en` oder `en-US` angegeben. Bei OpenAI wird die
+gewählte Stimme vor dem Start der Realtime-Session gesetzt und spricht auch die erste
+Begrüßung, damit innerhalb eines Anrufs kein hörbarer Stimmenwechsel entsteht.
+
+**Quellen:**
+
+- <https://developers.openai.com/api/docs/models/gpt-realtime-2.1>
+- <https://developers.openai.com/api/docs/models/gpt-realtime-2.1-mini>
+- <https://docs.livekit.io/agents/models/realtime/plugins/openai/>
 
 ## 1. Finale Technologieentscheidung
 
@@ -250,6 +283,7 @@ Stand 28.08.2026:
 | Python | `3.13.15` empfohlen |
 | LiveKit Agents | `1.7.1` |
 | LiveKit Google Plugin | `1.7.0` |
+| LiveKit OpenAI Plugin | `1.7.1` |
 | MCP Python SDK | `2.1.1` |
 | MCP Protokoll | `2026-07-28` |
 | LiveKit Server | `1.13.5` |
@@ -257,11 +291,14 @@ Stand 28.08.2026:
 | Gemini STT | `gemini-3.5-transcribe-live` |
 | Gemini Workhorse LLM | `gemini-3.7-flash` |
 | Gemini TTS | `gemini-3.1-flash-tts-preview` |
+| OpenAI Realtime | `gpt-realtime-2.1` |
+| OpenAI Realtime Mini | `gpt-realtime-2.1-mini` |
 
 **Quellen:**
 
 - <https://pypi.org/project/livekit-agents/1.7.1/>
 - <https://pypi.org/project/livekit-plugins-google/1.7.0/>
+- <https://pypi.org/project/livekit-plugins-openai/1.7.1/>
 - <https://pypi.org/project/mcp/2.1.1/>
 - <https://github.com/livekit/livekit/releases>
 - <https://ai.google.dev/gemini-api/docs/models>
@@ -2862,6 +2899,7 @@ voice:
     provider: gemini
     model: gemini-3.1-flash-live-preview
     voice: Puck
+    language: de
     thinking_level: minimal
     input_transcription: true
     output_transcription: true
@@ -3133,13 +3171,18 @@ TELNYX_SIP_USERNAME
 TELNYX_SIP_PASSWORD
 TELNYX_FROM_NUMBER
 GOOGLE_API_KEY
+OPENAI_API_KEY
+CALLTOOL_VOICE_PROVIDER
+CALLTOOL_VOICE_MODEL
+CALLTOOL_VOICE_LANGUAGE
+CALLTOOL_VOICE_NAME
 CALLTOOL_API_KEY
 WEBHOOK_SIGNING_SECRET
 ```
 
-## 130. Google API oder Vertex?
+## 130. Realtime-Provider-Zugang
 
-Da Region/Datenschutz aktuell kein Ziel ist:
+Für Gemini wird weiterhin die einfache Developer-API verwendet:
 
 Realtime
 
@@ -3151,6 +3194,17 @@ GOOGLE_API_KEY
 ```
 
 weniger Setup.
+
+Für OpenAI Realtime:
+
+```text
+OpenAI API
+OPENAI_API_KEY
+```
+
+Der jeweils ausgewählte Realtime-Provider benötigt seinen API-Key. Bleibt der
+Gemini-basierte Supervisor aktiviert, wird zusätzlich `GOOGLE_API_KEY` benötigt. Eine
+OpenAI-only-Installation deaktiviert Supervisor und optionales Shadow STT.
 
 ### 3.7 Supervisor
 
@@ -3167,7 +3221,7 @@ Cloud Integration
 
 gewünscht werden.
 
-## 131. Keine unnötige Provider-Mischung
+## 131. Provider bewusst auswählen
 
 Default:
 
@@ -3183,6 +3237,10 @@ Model behavior
 Billing
 Debugging
 ```
+
+Alternativ kann OpenAI Realtime den vollständigen Audio-Hot-Path übernehmen. Dabei wird
+nicht mitten in einer Session zwischen Realtime-Providern gewechselt. Die Auswahl erfolgt
+vor dem Anruf; Supervisor und Shadow STT sind davon getrennte, optionale Nebenpfade.
 
 ## 132. Outbound-Call End-to-End
 
@@ -4086,7 +4144,7 @@ strukturiertes Gesprächsergebnis
 │ Voice Tools                                   │
 │ Supervisor Cache                              │
 │                                               │
-│  Gemini 3.1 Flash Live ← FAST PATH            │
+│  Gemini Live / OpenAI Realtime ← FAST PATH    │
 │         │                                     │
 │         ├── native audio conversation         │
 │         ├── local function tools              │
@@ -4113,7 +4171,7 @@ strukturiertes Gesprächsergebnis
 
 ## 173. Finale Model-Rollen
 
-gemini-3.1-flash-live-preview
+gemini-3.1-flash-live-preview, gpt-realtime-2.1 oder gpt-realtime-2.1-mini
 
 ```text
 HÖRT
@@ -4122,6 +4180,9 @@ SPRICHT
 ```
 
 Normales Telefonat.
+
+Die OpenAI-Varianten nutzen ihre native Audioausgabe einschließlich Begrüßung. Die
+gewählte Sprache und Stimme gelten für die gesamte Session.
 
 gemini-3.5-transcribe-live
 
@@ -4181,7 +4242,7 @@ ist real.
 
 Wenn nur zehn Regeln umgesetzt werden:
 
-1. Gemini 3.1 Live direkt Audio↔Audio verwenden.
+1. Das gewählte Gemini-/OpenAI-Realtime-Modell direkt Audio↔Audio verwenden.
 2. thinkingLevel=minimal.
 3. Keine langsamen Tools im normalen Gespräch.
 4. Call State im RAM.
@@ -4242,6 +4303,17 @@ Gemini 3.1 Flash TTS
 Gemini TTS Streaming
 - <https://ai.google.dev/gemini-api/docs/speech-generation>
 
+### OpenAI Realtime
+
+GPT-Realtime-2.1
+- <https://developers.openai.com/api/docs/models/gpt-realtime-2.1>
+
+GPT-Realtime-2.1 Mini
+- <https://developers.openai.com/api/docs/models/gpt-realtime-2.1-mini>
+
+Realtime API
+- <https://platform.openai.com/docs/api-reference/realtime>
+
 ### LiveKit
 
 Pipeline Types
@@ -4252,6 +4324,9 @@ Realtime Models
 
 Gemini Live Plugin
 - <https://docs.livekit.io/agents/models/realtime/plugins/gemini/>
+
+OpenAI Realtime Plugin
+- <https://docs.livekit.io/agents/models/realtime/plugins/openai/>
 
 Gemini STT
 - <https://docs.livekit.io/agents/models/stt/gemini/>
@@ -4312,6 +4387,9 @@ LiveKit Agents 1.7.1
 LiveKit Google Plugin 1.7.0
 - <https://pypi.org/project/livekit-plugins-google/1.7.0/>
 
+LiveKit OpenAI Plugin 1.7.1
+- <https://pypi.org/project/livekit-plugins-openai/1.7.1/>
+
 MCP Python SDK 2.1.1
 - <https://pypi.org/project/mcp/2.1.1/>
 
@@ -4339,10 +4417,14 @@ Wenn morgen mit der Implementierung begonnen wird:
 LANGUAGE
 Python 3.13
 VOICE
-Gemini 3.1 Flash Live
+Gemini 3.1 Flash Live (default)
+oder GPT-Realtime-2.1 / GPT-Realtime-2.1 Mini
 thinking=minimal
+LANGUAGE / VOICE
+global per YAML/.env, pro Call überschreibbar
 SCRIPTED SPEECH
-Gemini 3.1 Flash TTS
+Gemini 3.1 Flash TTS für deutsche Gemini-Calls
+sonst native Realtime-Stimme
 SUPERVISOR
 Gemini 3.7 Flash
 TRANSCRIPTION
@@ -4373,7 +4455,7 @@ per-turn latency metrics
 
 ## 179. Architektur in einem Satz
 
-> **CallTool ist ein agentenunabhängiger MCP-/REST-Telefonservice, dessen Hot Path über Gemini 3.1 Flash Live direkt Audio↔Audio läuft, während lokale Policies und RAM-State Tool Calls in wenigen Millisekunden beantworten und Gemini 3.7, Gemini 3.5 Transcribe sowie Gemini TTS nur dort eingesetzt werden, wo sie zusätzlichen Nutzen bringen, ohne das normale Gespräch zu verlangsamen.**
+> **CallTool ist ein agentenunabhängiger MCP-/REST-Telefonservice, dessen Hot Path über ein auswählbares Gemini- oder OpenAI-Realtime-Modell direkt Audio↔Audio läuft, während lokale Policies und RAM-State Tool Calls in wenigen Millisekunden beantworten und Supervisor, Shadow STT sowie scripted TTS nur dort eingesetzt werden, wo sie zusätzlichen Nutzen bringen, ohne das normale Gespräch zu verlangsamen.**
 
 ## 180. Nächster sinnvoller Engineering-Deliverable
 
@@ -4402,7 +4484,7 @@ phone_call.status
 phone_call.cancel
 ```
 
-plus einem echten Gemini-Live-Testcall.
+plus einem echten Testcall mit dem ausgewählten Realtime-Provider.
 
 Erst wenn die gemessene Conversation Response Latency und Barge-in-Qualität stimmen, werden weitere Business-Funktionen gebaut.
 

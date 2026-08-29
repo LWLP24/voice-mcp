@@ -40,6 +40,12 @@ async def test_rest_call_lifecycle() -> None:
         "objective": "Vereinbare einen Kontrolltermin",
         "constraints": ["frühestens 15 Uhr"],
         "permissions": {"may_commit": True, "may_disclose": ["name"]},
+        "voice": {
+            "provider": "openai",
+            "model": "gpt-realtime-2.1-mini",
+            "language": "en_us",
+            "voice": "cedar",
+        },
         "client_request_id": "api-test-1",
     }
     app = build_app()
@@ -55,6 +61,12 @@ async def test_rest_call_lifecycle() -> None:
             cancelled = await client.post(f"/v1/calls/{call_id}/cancel", headers=headers)
 
             assert status.json()["status"] == "queued"
+            assert status.json()["request"]["voice"] == {
+                "provider": "openai",
+                "model": "gpt-realtime-2.1-mini",
+                "language": "en-US",
+                "voice": "cedar",
+            }
             assert [event["type"] for event in events.json()["events"]] == [
                 "call.created",
                 "call.validating",

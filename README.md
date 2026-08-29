@@ -2,7 +2,8 @@
 
 CallTool is a self-hosted telephone execution service for AI agents. Clients create and
 control outbound calls through MCP or REST, and the same worker can answer inbound calls
-to a Telnyx number. LiveKit carries media between Telnyx SIP and Gemini Live.
+to a Telnyx number. LiveKit carries media between Telnyx SIP and the selected native
+realtime voice provider: Gemini Live or OpenAI Realtime.
 
 The complete architecture and product decisions are documented in [projects.md](projects.md).
 Deployment and Telnyx provisioning are documented in
@@ -11,15 +12,16 @@ Deployment and Telnyx provisioning are documented in
 ## Development status
 
 The repository is under active development on the `feature/initial` branch. The v0.1 target
-is a German-language inbound and outbound caller with durable state, policy-controlled
-commitments, human-in-the-loop input, and low-latency native audio conversation.
+is a configurable multilingual inbound and outbound caller with durable state,
+policy-controlled commitments, human-in-the-loop input, and low-latency native audio
+conversation. German remains the default language.
 
 ## Prerequisites before `docker compose`
 
 There are two separate requirements: Docker must be able to run the local stack, and
-Telnyx, LiveKit, and Gemini must be configured before real phone calls can work. Python
-and `uv` are not required on the host when everything is run through Compose; they are
-only needed for local development commands.
+Telnyx, LiveKit, and at least one supported realtime AI provider must be configured before
+real phone calls can work. Python and `uv` are not required on the host when everything is
+run through Compose; they are only needed for local development commands.
 
 ### Host and Docker
 
@@ -123,13 +125,21 @@ another Telnyx SIP region, update `calls.inbound.allowed_addresses` from Telnyx'
 Telnyx's current RTP networks and port requirements are listed on the same page and
 should be considered when restricting the server firewall.
 
-### Gemini and LiveKit credentials
+### AI provider and LiveKit credentials
 
 You also need:
 
-- A Google AI Studio/Gemini API key with access to the configured Gemini Live, TTS, and
-  supervisor models. This is entered as `GOOGLE_API_KEY`. The current implementation does
-  not use an OpenAI API key.
+- Credentials for the selected realtime voice provider:
+  - Gemini: a Google AI Studio API key in `GOOGLE_API_KEY`, with access to the configured
+    Gemini Live model.
+  - OpenAI: an OpenAI API key in `OPENAI_API_KEY`, with Realtime API access. Supported
+    models are `gpt-realtime-2.1` and the faster, lower-cost
+    `gpt-realtime-2.1-mini`. There is no OpenAI model named
+    `gpt-realtime-2.1-flash`.
+- The default background supervisor and Gemini scripted-TTS features also use
+  `GOOGLE_API_KEY`. To run with only an OpenAI key, disable `voice.supervisor.enabled`
+  in `config/calltool.yaml`; Gemini scripted TTS is bypassed automatically for OpenAI
+  Realtime calls. Keep optional Gemini shadow STT disabled as well.
 - A self-hosted LiveKit key and secret. For the first local test, keep the matching
   development values from `config/livekit.yaml` and `config/sip.yaml`:
   `devkey` / `secret`. For production, generate strong values and replace them in all
@@ -152,7 +162,10 @@ Edit `.env` and set at least these values for real calls:
 ```dotenv
 CALLTOOL_ENV=development
 CALLTOOL_API_KEY=<strong-calltool-api-key>
+
+# Configure the provider key or keys that are used by your setup.
 GOOGLE_API_KEY=<google-gemini-api-key>
+OPENAI_API_KEY=<openai-api-key>
 
 TELNYX_SIP_ADDRESS=sip.telnyx.eu
 TELNYX_SIP_USERNAME=<telnyx-outbound-sip-username>
@@ -175,6 +188,67 @@ inside an already-initialized PostgreSQL volume.
 For production, change `CALLTOOL_ENV` to `production` only after replacing every
 development placeholder (`change-me`, `devkey`, and `secret`) and applying the matching
 LiveKit config changes described above. Keep `.env` private and never commit it.
+
+### Voice provider, model, language, and voice
+
+The checked-in default is Gemini in German with the `Puck` voice. You can change the
+global default in `config/calltool.yaml`, or use these `.env` overrides without editing
+YAML:
+
+```dotenv
+# Gemini default
+CALLTOOL_VOICE_PROVIDER=gemini
+CALLTOOL_VOICE_MODEL=gemini-3.1-flash-live-preview
+CALLTOOL_VOICE_LANGUAGE=de
+CALLTOOL_VOICE_NAME=Puck
+```
+
+For OpenAI Realtime, choose either the full model or the official mini model:
+
+```dotenv
+OPENAI_API_KEY=<openai-api-key>
+CALLTOOL_VOICE_PROVIDER=openai
+CALLTOOL_VOICE_MODEL=gpt-realtime-2.1
+CALLTOOL_VOICE_LANGUAGE=de
+CALLTOOL_VOICE_NAME=marin
+```
+
+Use `gpt-realtime-2.1-mini` when lower latency and cost matter more than the full
+model's capability. Both variants are native speech-to-speech models. The supported
+built-in OpenAI voices are `alloy`, `ash`, `ballad`, `coral`, `echo`, `sage`, `shimmer`,
+`verse`, `marin`, and `cedar`. Eligible OpenAI custom voice IDs beginning with `voice_`
+are accepted as well.
+
+Language accepts a compact BCP-47 language tag such as `de`, `en`, `en-US`, or `fr-FR`.
+It is included in the system instructions and, for OpenAI, passed to input-audio
+transcription. The voice is selected before the realtime session starts and cannot be
+changed after that session has produced audio.
+
+An individual outbound REST or MCP call can override all four values. Per-call values
+take precedence over `.env`, and `.env` takes precedence over `config/calltool.yaml`:
+
+```json
+{
+  "target": {"phone_number": "+49301234567", "name": "Test"},
+  "objective": "Vereinbare einen Rückruf.",
+  "voice": {
+    "provider": "openai",
+    "model": "gpt-realtime-2.1-mini",
+    "language": "en-US",
+    "voice": "cedar"
+  }
+}
+```
+
+For OpenAI calls, the native Realtime model also speaks the initial disclosure and
+greeting so the voice stays consistent from the first sentence. Gemini calls keep the
+pre-synthesized scripted greeting for German; other languages use the selected native
+realtime model for the localized greeting.
+
+The exact model names and integration options are documented by
+[OpenAI GPT-Realtime-2.1](https://developers.openai.com/api/docs/models/gpt-realtime-2.1),
+[OpenAI GPT-Realtime-2.1 Mini](https://developers.openai.com/api/docs/models/gpt-realtime-2.1-mini),
+and the [LiveKit OpenAI Realtime plugin](https://docs.livekit.io/agents/models/realtime/plugins/openai/).
 
 ## Quick start
 

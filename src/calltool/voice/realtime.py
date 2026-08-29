@@ -1,23 +1,105 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal, cast
 
 from google.genai import types
-from livekit.agents import Agent, AgentSession, llm, tts
+from livekit.agents import Agent, AgentSession, TurnHandlingOptions, llm, tts
 from livekit.agents.types import NOT_GIVEN
 from livekit.plugins import google
+from livekit.plugins import openai as livekit_openai
+from openai.types.realtime import AudioTranscription, RealtimeReasoning
 
-from calltool.calls.models import CallRecord
+from calltool.calls.models import CallRecord, CallVoiceOptions
 from calltool.config import Settings
+from calltool.language import normalize_language_code
 from calltool.voice.prompts import compile_call_prompt
+
+VoiceProvider = Literal["gemini", "openai"]
+
+OPENAI_REALTIME_MODELS = frozenset({"gpt-realtime-2.1", "gpt-realtime-2.1-mini"})
+OPENAI_REALTIME_VOICES = frozenset(
+    {"alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse", "marin", "cedar"}
+)
+
+_DEFAULT_MODELS: dict[VoiceProvider, str] = {
+    "gemini": "gemini-3.1-flash-live-preview",
+    "openai": "gpt-realtime-2.1",
+}
+_DEFAULT_VOICES: dict[VoiceProvider, str] = {"gemini": "Puck", "openai": "marin"}
+
+
+@dataclass(frozen=True)
+class VoiceSelection:
+    provider: VoiceProvider
+    model: str
+    language: str
+    voice: str
 
 
 @dataclass(frozen=True)
 class VoiceRuntime:
     session: AgentSession[None]
     agent: Agent
-    scripted_tts: tts.TTS[Any]
+    selection: VoiceSelection
+    scripted_tts: tts.TTS[Any] | None
+
+
+def resolve_voice_selection(
+    settings: Settings,
+    options: CallVoiceOptions | None = None,
+) -> VoiceSelection:
+    configured = settings.config.voice.realtime
+    options = options or CallVoiceOptions()
+
+    environment_provider = settings.CALLTOOL_VOICE_PROVIDER.strip().lower()
+    base_provider = environment_provider or configured.provider
+    provider_raw = options.provider or base_provider
+    if provider_raw not in {"gemini", "openai"}:
+        raise ValueError("voice provider must be 'gemini' or 'openai'")
+    provider = cast(VoiceProvider, provider_raw)
+
+    provider_changed_per_call = options.provider is not None and options.provider != base_provider
+    model = options.model
+    if model is None and not provider_changed_per_call:
+        model = settings.CALLTOOL_VOICE_MODEL.strip() or None
+    if model is None:
+        model = configured.model if configured.provider == provider else _DEFAULT_MODELS[provider]
+
+    voice_name = options.voice
+    if voice_name is None and not provider_changed_per_call:
+        voice_name = settings.CALLTOOL_VOICE_NAME.strip() or None
+    if voice_name is None:
+        voice_name = (
+            configured.voice if configured.provider == provider else _DEFAULT_VOICES[provider]
+        )
+    language = normalize_language_code(
+        options.language or settings.CALLTOOL_VOICE_LANGUAGE.strip() or configured.language
+    )
+
+    if provider == "openai":
+        if model == "gpt-realtime-2.1-flash":
+            raise ValueError(
+                "OpenAI has no gpt-realtime-2.1-flash model; use gpt-realtime-2.1-mini"
+            )
+        if model not in OPENAI_REALTIME_MODELS:
+            supported = ", ".join(sorted(OPENAI_REALTIME_MODELS))
+            raise ValueError(f"unsupported OpenAI Realtime model {model!r}; use {supported}")
+        if voice_name not in OPENAI_REALTIME_VOICES and not voice_name.startswith("voice_"):
+            supported = ", ".join(sorted(OPENAI_REALTIME_VOICES))
+            raise ValueError(
+                f"unsupported OpenAI Realtime voice {voice_name!r}; use {supported}, "
+                "or an eligible custom voice ID beginning with 'voice_'"
+            )
+    elif model.startswith("gpt-realtime"):
+        raise ValueError("OpenAI Realtime models require voice provider 'openai'")
+
+    return VoiceSelection(
+        provider=provider,
+        model=model,
+        language=language,
+        voice=voice_name,
+    )
 
 
 def build_voice_runtime(
@@ -26,50 +108,94 @@ def build_voice_runtime(
     tools: list[llm.Tool | llm.Toolset],
 ) -> VoiceRuntime:
     voice = settings.config.voice
-    api_key = settings.GOOGLE_API_KEY.get_secret_value()
-    realtime = google.realtime.RealtimeModel(
-        model=voice.realtime.model,
-        api_key=api_key,
-        voice=voice.realtime.voice,
-        instructions=compile_call_prompt(call),
-        input_audio_transcription=(
-            types.AudioTranscriptionConfig() if voice.realtime.input_transcription else None
-        ),
-        output_audio_transcription=(
-            types.AudioTranscriptionConfig() if voice.realtime.output_transcription else None
-        ),
-        context_window_compression=(
-            types.ContextWindowCompressionConfig(
-                trigger_tokens=25_000,
-                sliding_window=types.SlidingWindow(target_tokens=8_000),
+    selection = resolve_voice_selection(settings, call.request.voice)
+    prompt = compile_call_prompt(call, selection.language)
+    realtime: llm.RealtimeModel
+
+    if selection.provider == "openai":
+        api_key = settings.OPENAI_API_KEY.get_secret_value()
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY is required for the OpenAI Realtime provider")
+        realtime = livekit_openai.realtime.RealtimeModel(
+            model=selection.model,
+            api_key=api_key,
+            voice=selection.voice,
+            input_audio_transcription=(
+                AudioTranscription(
+                    model="gpt-4o-mini-transcribe",
+                    language=selection.language,
+                )
+                if voice.realtime.input_transcription
+                else None
+            ),
+            reasoning=RealtimeReasoning(effort=voice.realtime.thinking_level),
+        )
+        scripted_tts: tts.TTS[Any] | None = None
+    else:
+        api_key = settings.GOOGLE_API_KEY.get_secret_value()
+        if not api_key:
+            raise ValueError("GOOGLE_API_KEY is required for the Gemini Realtime provider")
+        realtime = google.realtime.RealtimeModel(
+            model=selection.model,
+            api_key=api_key,
+            voice=selection.voice,
+            language=selection.language,
+            instructions=prompt,
+            input_audio_transcription=(
+                types.AudioTranscriptionConfig() if voice.realtime.input_transcription else None
+            ),
+            output_audio_transcription=(
+                types.AudioTranscriptionConfig() if voice.realtime.output_transcription else None
+            ),
+            context_window_compression=(
+                types.ContextWindowCompressionConfig(
+                    trigger_tokens=25_000,
+                    sliding_window=types.SlidingWindow(target_tokens=8_000),
+                )
+                if voice.realtime.context_compression.enabled
+                else NOT_GIVEN
+            ),
+            session_resumption=(
+                types.SessionResumptionConfig(transparent=True)
+                if voice.realtime.session_resumption.enabled
+                else NOT_GIVEN
+            ),
+            thinking_config=types.ThinkingConfig(
+                thinking_level=types.ThinkingLevel(voice.realtime.thinking_level.upper()),
+                include_thoughts=False,
+            ),
+        )
+        scripted_tts = (
+            google.beta.GeminiTTS(
+                model=voice.scripted_tts.model,
+                voice_name=selection.voice,
+                api_key=api_key,
             )
-            if voice.realtime.context_compression.enabled
-            else NOT_GIVEN
-        ),
-        session_resumption=(
-            types.SessionResumptionConfig(transparent=True)
-            if voice.realtime.session_resumption.enabled
-            else NOT_GIVEN
-        ),
-        thinking_config=types.ThinkingConfig(
-            thinking_level=types.ThinkingLevel(voice.realtime.thinking_level.upper()),
-            include_thoughts=False,
-        ),
-    )
-    scripted_tts = google.beta.GeminiTTS(
-        model=voice.scripted_tts.model,
-        voice_name=voice.scripted_tts.voice,
-        api_key=api_key,
-    )
+            if voice.scripted_tts.enabled
+            and voice.scripted_tts.provider == "gemini"
+            and selection.language == "de"
+            else None
+        )
+
+    turn_handling: TurnHandlingOptions = {
+        "turn_detection": "realtime_llm",
+        "interruption": {
+            "enabled": True,
+            "min_duration": 0.15,
+            "false_interruption_timeout": 1.0,
+        },
+    }
     session: AgentSession[None] = AgentSession(
         llm=realtime,
-        tts=scripted_tts,
+        tts=scripted_tts if scripted_tts is not None else NOT_GIVEN,
         tools=tools,
-        turn_detection="realtime_llm",
-        allow_interruptions=True,
-        min_interruption_duration=0.15,
-        false_interruption_timeout=1.0,
+        turn_handling=turn_handling,
         max_tool_steps=5,
     )
-    agent = Agent(instructions=compile_call_prompt(call), tools=tools)
-    return VoiceRuntime(session=session, agent=agent, scripted_tts=scripted_tts)
+    agent = Agent(instructions=prompt, tools=tools)
+    return VoiceRuntime(
+        session=session,
+        agent=agent,
+        selection=selection,
+        scripted_tts=scripted_tts,
+    )

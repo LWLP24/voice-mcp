@@ -6,6 +6,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from calltool.language import normalize_language_code
+
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
@@ -56,6 +58,20 @@ class CallPermissions(BaseModel):
     may_disclose: list[str] = Field(default_factory=list)
 
 
+class CallVoiceOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Literal["gemini", "openai"] | None = None
+    model: str | None = Field(default=None, min_length=1, max_length=200)
+    language: str | None = None
+    voice: str | None = Field(default=None, min_length=1, max_length=100)
+
+    @field_validator("language")
+    @classmethod
+    def validate_language(cls, value: str | None) -> str | None:
+        return normalize_language_code(value) if value is not None else None
+
+
 class CallCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -64,6 +80,7 @@ class CallCreateRequest(BaseModel):
     constraints: list[str] = Field(default_factory=list, max_length=100)
     context: dict[str, Any] = Field(default_factory=dict)
     permissions: CallPermissions = Field(default_factory=CallPermissions)
+    voice: CallVoiceOptions = Field(default_factory=CallVoiceOptions)
     client_request_id: str | None = Field(default=None, min_length=1, max_length=200)
 
 

@@ -11,7 +11,8 @@ bridge. Telnyx and LiveKit both document this integration directly.
 - A Telnyx FQDN SIP Connection with outbound username/password authentication and
   inbound routing to LiveKit SIP
 - A public server for LiveKit, LiveKit SIP, CallTool, PostgreSQL, Redis, and Caddy
-- Google Gemini API credentials
+- Credentials for Gemini Live or OpenAI Realtime, depending on the selected voice
+  provider
 
 German numbers are not instant. Telnyx requires identity and address documents; local
 numbers also require an address matching the area code. Telnyx currently states that
@@ -88,6 +89,36 @@ allowlist for the two European Telnyx SIP signaling proxies currently documented
 `sip.telnyx.com`. If the selected Telnyx SIP region changes, update `allowed_addresses`
 before running the bootstrap again.
 
+Select the realtime voice provider globally with `.env`. The full OpenAI model and its
+faster, lower-cost mini variant are both supported:
+
+```dotenv
+# Gemini
+GOOGLE_API_KEY=<google-api-key>
+CALLTOOL_VOICE_PROVIDER=gemini
+CALLTOOL_VOICE_MODEL=gemini-3.1-flash-live-preview
+CALLTOOL_VOICE_LANGUAGE=de
+CALLTOOL_VOICE_NAME=Puck
+
+# Or OpenAI
+OPENAI_API_KEY=<openai-api-key>
+CALLTOOL_VOICE_PROVIDER=openai
+CALLTOOL_VOICE_MODEL=gpt-realtime-2.1
+CALLTOOL_VOICE_LANGUAGE=de
+CALLTOOL_VOICE_NAME=marin
+```
+
+For OpenAI, `gpt-realtime-2.1-mini` is the supported fast alternative. There is no
+`gpt-realtime-2.1-flash` model. Language accepts tags such as `de`, `en`, and `en-US`.
+Provider, model, language, and voice can also be overridden per outbound REST/MCP call;
+see the main README for the request schema and supported OpenAI voices.
+
+The default background supervisor remains Gemini-based. If it stays enabled, configure
+`GOOGLE_API_KEY` even when OpenAI handles the realtime conversation. For an OpenAI-only
+installation, disable `voice.supervisor.enabled` in `config/calltool.yaml` and leave the
+optional Gemini shadow STT disabled. Gemini scripted TTS is skipped automatically for
+OpenAI calls.
+
 ## 4. Start and bootstrap
 
 Start the infrastructure:
@@ -160,6 +191,9 @@ address, or blocked RTP ports.
 - [LiveKit outbound trunks](https://docs.livekit.io/telephony/making-calls/outbound-trunk/)
 - [LiveKit inbound trunks](https://docs.livekit.io/telephony/accepting-calls/inbound-trunk/)
 - [LiveKit inbound dispatch rules](https://docs.livekit.io/telephony/accepting-calls/dispatch-rule/)
+- [LiveKit OpenAI Realtime plugin](https://docs.livekit.io/agents/models/realtime/plugins/openai/)
+- [OpenAI GPT-Realtime-2.1](https://developers.openai.com/api/docs/models/gpt-realtime-2.1)
+- [OpenAI GPT-Realtime-2.1 Mini](https://developers.openai.com/api/docs/models/gpt-realtime-2.1-mini)
 - [Telnyx LiveKit configuration](https://developers.telnyx.com/docs/voice/sip-trunking/livekit-configuration-guide)
 - [Telnyx SIP regions and ports](https://sip.telnyx.com/)
 - [German DID requirements](https://support.telnyx.com/en/articles/1311450-germany-did-requirements)

@@ -5,7 +5,7 @@ import json
 from calltool.calls.models import CallDirection, CallRecord
 
 
-def compile_call_prompt(call: CallRecord) -> str:
+def compile_call_prompt(call: CallRecord, language: str = "de") -> str:
     request = call.request
     disclosure = request.permissions.may_disclose
     if call.direction is CallDirection.INBOUND:
@@ -48,7 +48,9 @@ bevor authorize_commit allowed=true geliefert hat."""
 {identity}
 
 STYLE
-Sprich natürlich, freundlich und knapp auf Deutsch.
+Sprich ausschließlich in der Sprache mit dem BCP-47-Code {language}.
+Verwende den üblichen neutralen Akzent dieser Sprache, sofern nichts anderes vorgegeben ist.
+Sprich natürlich, freundlich und knapp.
 Nutze ein bis zwei Sätze pro Gesprächszug und stelle nur eine Frage auf einmal.
 Halte keine Monologe, erzähle keine internen Gedankengänge und wiederhole nichts unnötig.
 Unterbrich deine Ausgabe sofort, wenn dein Gesprächspartner spricht.
@@ -94,4 +96,14 @@ def greeting_for(call: CallRecord) -> str:
     return (
         f"Guten Tag, hier ist ein KI-Assistent{representation}. "
         f"Ich rufe wegen Folgendem an: {call.request.objective}."
+    )
+
+
+def greeting_instruction_for(call: CallRecord, language: str) -> str:
+    return (
+        f"Beginne jetzt das Telefongespräch in der Sprache mit dem BCP-47-Code {language}. "
+        "Formuliere genau eine kurze, natürliche Begrüßung mit derselben Bedeutung wie der "
+        f"folgende Ausgangstext: {json.dumps(greeting_for(call), ensure_ascii=False)}. "
+        "Die Offenlegung als KI-Assistent muss erhalten bleiben. Rufe dabei kein Tool auf und "
+        "füge keine weiteren Informationen hinzu."
     )

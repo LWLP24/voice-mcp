@@ -16,6 +16,7 @@ dependencies = [
   "httpx>=0.28,<1",
   "livekit-agents==1.7.1",
   "livekit-plugins-google==1.7.0",
+  "livekit-plugins-openai==1.7.1",
   "mcp==2.1.1",
   "opentelemetry-api>=1.36,<2",
   "opentelemetry-exporter-otlp-proto-http>=1.36,<2",

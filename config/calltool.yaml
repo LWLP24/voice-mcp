@@ -33,6 +33,7 @@ voice:
     provider: gemini
     model: gemini-3.1-flash-live-preview
     voice: Puck
+    language: de
     thinking_level: minimal
     input_transcription: true
     output_transcription: true

@@ -13,6 +13,7 @@ from calltool.calls.service import CallService
 from calltool.config import get_settings
 from calltool.policy.engine import PolicyEngine
 from calltool.storage.postgres import PostgresCallRepository
+from calltool.voice.realtime import resolve_voice_selection
 
 
 @dataclass(frozen=True)
@@ -137,23 +138,60 @@ async def run(call_number: str | None = None) -> int:
         finally:
             if inbound_client is not None:
                 await inbound_client.aclose()
+    try:
+        voice_selection = resolve_voice_selection(settings)
+        provider_key = (
+            settings.OPENAI_API_KEY.get_secret_value()
+            if voice_selection.provider == "openai"
+            else settings.GOOGLE_API_KEY.get_secret_value()
+        )
+        checks.append(
+            Check(
+                f"{voice_selection.provider.title()} Realtime",
+                bool(provider_key),
+                (
+                    f"{voice_selection.model}, language={voice_selection.language}, "
+                    f"voice={voice_selection.voice}"
+                ),
+            )
+        )
+    except ValueError as exc:
+        voice_selection = None
+        checks.append(Check("Realtime voice configuration", False, str(exc)))
+
+    supervisor_enabled = settings.config.voice.supervisor.enabled
     checks.append(
         Check(
-            "Gemini Live",
-            bool(settings.GOOGLE_API_KEY.get_secret_value()),
-            settings.config.voice.realtime.model,
+            "Gemini supervisor",
+            not supervisor_enabled or bool(settings.GOOGLE_API_KEY.get_secret_value()),
+            settings.config.voice.supervisor.model if supervisor_enabled else "disabled",
+            informational=not supervisor_enabled,
         )
     )
-    checks.append(Check("Gemini supervisor", True, settings.config.voice.supervisor.model))
-    checks.append(Check("Gemini TTS", True, settings.config.voice.scripted_tts.model))
+    scripted_tts_enabled = bool(
+        voice_selection is not None
+        and voice_selection.provider == "gemini"
+        and settings.config.voice.scripted_tts.enabled
+    )
+    checks.append(
+        Check(
+            "Gemini scripted TTS",
+            not scripted_tts_enabled or bool(settings.GOOGLE_API_KEY.get_secret_value()),
+            (
+                settings.config.voice.scripted_tts.model
+                if scripted_tts_enabled
+                else "provider-native realtime greeting"
+            ),
+            informational=not scripted_tts_enabled,
+        )
+    )
+    shadow_stt_enabled = settings.config.voice.shadow_stt.enabled
     checks.append(
         Check(
             "Shadow STT",
-            True,
-            settings.config.voice.shadow_stt.model
-            if settings.config.voice.shadow_stt.enabled
-            else "disabled",
-            informational=not settings.config.voice.shadow_stt.enabled,
+            not shadow_stt_enabled or bool(settings.GOOGLE_API_KEY.get_secret_value()),
+            settings.config.voice.shadow_stt.model if shadow_stt_enabled else "disabled",
+            informational=not shadow_stt_enabled,
         )
     )
     checks.append(

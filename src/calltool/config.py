@@ -5,8 +5,10 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from calltool.language import normalize_language_code
 
 
 class ServerConfig(BaseModel):
@@ -59,14 +61,20 @@ class ToggleConfig(BaseModel):
 
 
 class RealtimeVoiceConfig(BaseModel):
-    provider: str = "gemini"
+    provider: Literal["gemini", "openai"] = "gemini"
     model: str = "gemini-3.1-flash-live-preview"
     voice: str = "Puck"
+    language: str = "de"
     thinking_level: Literal["minimal", "low", "medium", "high"] = "minimal"
     input_transcription: bool = True
     output_transcription: bool = True
     context_compression: ToggleConfig = Field(default_factory=ToggleConfig)
     session_resumption: ToggleConfig = Field(default_factory=ToggleConfig)
+
+    @field_validator("language")
+    @classmethod
+    def validate_language(cls, value: str) -> str:
+        return normalize_language_code(value)
 
 
 class ScriptedTTSConfig(BaseModel):
@@ -170,6 +178,11 @@ class Settings(BaseSettings):
     TELNYX_FROM_NUMBER: str = ""
 
     GOOGLE_API_KEY: SecretStr = SecretStr("")
+    OPENAI_API_KEY: SecretStr = SecretStr("")
+    CALLTOOL_VOICE_PROVIDER: str = ""
+    CALLTOOL_VOICE_MODEL: str = ""
+    CALLTOOL_VOICE_LANGUAGE: str = ""
+    CALLTOOL_VOICE_NAME: str = ""
     WEBHOOK_URL: str = ""
     WEBHOOK_SIGNING_SECRET: SecretStr = SecretStr("change-me")
 
@@ -196,9 +209,19 @@ class Settings(BaseSettings):
             "TELNYX_SIP_USERNAME": self.TELNYX_SIP_USERNAME,
             "TELNYX_SIP_PASSWORD": self.TELNYX_SIP_PASSWORD.get_secret_value(),
             "TELNYX_FROM_NUMBER": self.TELNYX_FROM_NUMBER,
-            "GOOGLE_API_KEY": self.GOOGLE_API_KEY.get_secret_value(),
             "WEBHOOK_SIGNING_SECRET": self.WEBHOOK_SIGNING_SECRET.get_secret_value(),
         }
+        provider = self.CALLTOOL_VOICE_PROVIDER or self.config.voice.realtime.provider
+        if provider == "openai":
+            placeholders["OPENAI_API_KEY"] = self.OPENAI_API_KEY.get_secret_value()
+        else:
+            placeholders["GOOGLE_API_KEY"] = self.GOOGLE_API_KEY.get_secret_value()
+        if (
+            self.config.voice.supervisor.enabled
+            or self.config.voice.shadow_stt.enabled
+            or self.config.features.shadow_stt
+        ):
+            placeholders["GOOGLE_API_KEY"] = self.GOOGLE_API_KEY.get_secret_value()
         invalid = [
             name
             for name, value in placeholders.items()

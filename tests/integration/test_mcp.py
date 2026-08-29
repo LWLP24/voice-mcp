@@ -36,9 +36,16 @@ async def test_mcp_exposes_required_tools_and_creates_call() -> None:
             "target": {"phone_number": "+49301234567", "name": "Praxis"},
             "objective": "Vereinbare einen Termin",
             "permissions": {"may_commit": True},
+            "voice": {
+                "provider": "openai",
+                "model": "gpt-realtime-2.1-mini",
+                "language": "en-US",
+                "voice": "marin",
+            },
         },
     )
     assert isinstance(result, CallToolResult)
     assert result.is_error is False
     assert result.structured_content is not None
     assert result.structured_content["status"] == "queued"
+    assert result.structured_content["request"]["voice"]["provider"] == "openai"

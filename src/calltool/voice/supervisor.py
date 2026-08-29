@@ -12,10 +12,15 @@ from calltool.config import Settings
 class GeminiSupervisor:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
-        self._client = genai.Client(api_key=settings.GOOGLE_API_KEY.get_secret_value())
+        api_key = settings.GOOGLE_API_KEY.get_secret_value()
+        self._client = (
+            genai.Client(api_key=api_key)
+            if settings.config.voice.supervisor.enabled and api_key
+            else None
+        )
 
     async def enrich_outcome(self, call: CallRecord, outcome: CallOutcome) -> CallOutcome:
-        if not self._settings.config.voice.supervisor.enabled:
+        if not self._settings.config.voice.supervisor.enabled or self._client is None:
             return outcome
         prompt = {
             "task": "Formuliere ausschließlich eine knappe deutsche Zusammenfassung.",
@@ -50,4 +55,5 @@ class GeminiSupervisor:
         return outcome
 
     async def close(self) -> None:
-        await self._client.aio.aclose()
+        if self._client is not None:
+            await self._client.aio.aclose()

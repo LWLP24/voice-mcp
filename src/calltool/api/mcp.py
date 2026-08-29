@@ -10,6 +10,7 @@ from calltool.calls.models import (
     CallCreateRequest,
     CallPermissions,
     CallTarget,
+    CallVoiceOptions,
 )
 from calltool.calls.service import CallService
 
@@ -47,6 +48,7 @@ def build_mcp_server(slot: ServiceSlot, *, principal_id: str = "mcp") -> MCPServ
         constraints: list[str] | None = None,
         context: dict[str, Any] | None = None,
         permissions: CallPermissions | None = None,
+        voice: CallVoiceOptions | None = None,
         client_request_id: str | None = None,
     ) -> dict[str, Any]:
         call = await slot.get().create_call(
@@ -56,6 +58,7 @@ def build_mcp_server(slot: ServiceSlot, *, principal_id: str = "mcp") -> MCPServ
                 constraints=constraints or [],
                 context=context or {},
                 permissions=permissions or CallPermissions(),
+                voice=voice or CallVoiceOptions(),
                 client_request_id=client_request_id,
             ),
             principal_id=principal_id,

@@ -23,7 +23,7 @@ from calltool.config import Settings
 from calltool.policy.engine import PolicyEngine
 from calltool.realtime.events import build_event_dispatcher
 from calltool.storage.postgres import PostgresCallRepository
-from calltool.voice.prompts import greeting_for
+from calltool.voice.prompts import greeting_for, greeting_instruction_for
 from calltool.voice.realtime import build_voice_runtime
 from calltool.voice.scripted_speech import frame_stream, pre_synthesize
 from calltool.voice.supervisor import GeminiSupervisor
@@ -113,7 +113,8 @@ async def handle_call(ctx: JobContext, settings: Settings) -> None:
         tools = build_tools(tool_runtime, direction=call.direction)
         voice = build_voice_runtime(call, settings, tools)
         greeting = greeting_for(call)
-        greeting_task = asyncio.create_task(pre_synthesize(voice.scripted_tts, greeting))
+        if voice.scripted_tts is not None:
+            greeting_task = asyncio.create_task(pre_synthesize(voice.scripted_tts, greeting))
 
         if not inbound:
             participant_identity = f"callee-{call.id.removeprefix('call_').lower()}"
@@ -151,9 +152,10 @@ async def handle_call(ctx: JobContext, settings: Settings) -> None:
                     },
                     expected_statuses={CallStatus.RINGING},
                 )
-                greeting_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await greeting_task
+                if greeting_task is not None:
+                    greeting_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await greeting_task
                 ctx.shutdown(code)
                 return
 
@@ -212,12 +214,18 @@ async def handle_call(ctx: JobContext, settings: Settings) -> None:
             expected_statuses={CallStatus.CONNECTED},
         )
 
-        greeting_audio = await greeting_task
-        await voice.session.say(
-            greeting,
-            audio=frame_stream(greeting_audio),
-            allow_interruptions=True,
-        )
+        if greeting_task is not None:
+            greeting_audio = await greeting_task
+            await voice.session.say(
+                greeting,
+                audio=frame_stream(greeting_audio),
+                allow_interruptions=True,
+            )
+        else:
+            voice.session.generate_reply(
+                instructions=greeting_instruction_for(call, voice.selection.language),
+                allow_interruptions=True,
+            )
 
         end_reason = await _wait_for_call_end(disconnected, finish_event, watchdog_unrecoverable)
         if end_reason == "finish":
