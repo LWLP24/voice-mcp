@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "calltool"
-version = "0.1.0"
+version = "0.1.1.dev0"
 description = "Self-hosted MCP and REST telephone execution service for AI agents"
 readme = "README.md"
 requires-python = ">=3.13,<3.14"

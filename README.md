@@ -5,7 +5,8 @@ control outbound calls through MCP or REST, and the same worker can answer inbou
 to a Telnyx number. LiveKit carries media between Telnyx SIP and the selected native
 realtime voice provider: Gemini Live or OpenAI Realtime.
 
-The complete architecture and product decisions are documented in [projects.md](projects.md).
+The complete architecture and product decisions are documented in
+[projects-v0.1.md](projects-v0.1.md).
 Deployment and Telnyx provisioning are documented in
 [docs/self-hosting.md](docs/self-hosting.md).
 
@@ -404,6 +405,13 @@ Text transcripts are enabled through `storage.transcript: true` in
 `false` if full conversation text must not be retained. Existing calls and events remain
 in PostgreSQL across container restarts through the Compose volume.
 
+During an active call, the worker owns one dedicated `ActiveCallContext` in RAM. Local
+voice tools read and update this hot state without a PostgreSQL lookup. A serialized
+background writer persists facts, candidates, transcript turns, and events in order;
+worker shutdown flushes the queue. Safety-critical commitment and completion writes are
+acknowledged by PostgreSQL before the tool reports success. PostgreSQL remains the source
+of truth after the call and after process restarts.
+
 ### Local development without the full Compose stack
 
 If only the API is being developed locally, install Python 3.13.15 and `uv`:
@@ -419,19 +427,29 @@ for real calls. Detailed public deployment and Telnyx provisioning notes are in
 
 ## Container releases
 
-Every pushed Git tag builds the image for `linux/amd64` and `linux/arm64` and publishes it
-to:
+Every successful push to `feature/initial` runs linting, type checks, unit and PostgreSQL
+integration tests. The same workflow then creates the next development tag and publishes
+a multi-architecture image for `linux/amd64` and `linux/arm64` to:
 
 ```text
 ghcr.io/lwlp24/voice-mcp
 ```
 
-Semantic version tags are recommended:
+Because `v0.1.0` already exists as the initial repository release, current development
+builds target the next patch release and are numbered automatically:
 
-```bash
-git tag v0.1.0
-git push origin v0.1.0
+```text
+v0.1.1-dev.1
+v0.1.1-dev.2
+v0.1.1-dev.3
 ```
 
-This publishes version aliases such as `0.1.0`, `0.1`, `0`, and `latest`. Pre-release
-tags such as `v0.2.0-rc.1` are not promoted to `latest`.
+Do not create these development tags manually. The workflow serializes runs for the
+branch, derives the release base from the PEP 440 version in `pyproject.toml`, determines
+the highest matching `-dev.N` tag, increments `N`, tags the tested commit, and builds that
+exact version. Development images receive both the raw `v0.1.1-dev.N` and normalized
+`0.1.1-dev.N` image tags, but never update `latest`.
+
+When the patch is ready, push a stable tag such as `v0.1.1`. A stable semantic version
+also publishes the `0.1`, `0`, and `latest` aliases. Manually pushed `v*` tags still run
+the complete quality gate before their image is published.

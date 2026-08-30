@@ -627,16 +627,23 @@ Während eines laufenden Calls komplett im Worker RAM:
 @dataclass
 class ActiveCallContext:
     call_id: str
+    direction: str
     objective: str
-    constraints: dict
+    constraints: list
     permissions: dict
     facts: dict
     candidates: list
     commitments: list
-    pending_input: dict | None
+    pending_input_request_id: str | None
     phase: str
-    connected_at: datetime
+    status: str
+    connected_at: datetime | None
 ```
+
+Die konkrete Implementierung liegt in `src/calltool/realtime/active_calls.py`. Jeder
+LiveKit-Worker-Job besitzt genau einen solchen Kontext und einen seriellen
+Persistenz-Writer. Dadurch bleiben RAM-Snapshots, Transcript-Turns und PostgreSQL-Events
+in einer definierten Reihenfolge.
 
 Tool Call:
 
@@ -687,7 +694,9 @@ Tool Call
    └─ Event asynchron persistieren
 ```
 
-Kritische Commitments werden synchron durable geschrieben, bevor sie als final markiert werden.
+Kritische Commitments und der Call-Abschluss werden synchron durable geschrieben, bevor
+das jeweilige Tool Erfolg meldet. Schlägt ein notwendiger Schreibvorgang fehl, werden
+nachfolgende State-Schreibvorgänge nicht über den fehlerhaften Stand hinweg fortgesetzt.
 
 ## 16. Policy Engine
 
@@ -3824,7 +3833,20 @@ model config check
 Docker build
 ```
 
-Bei jedem neuen Git-Tag baut GitHub Actions zusätzlich ein Multi-Arch-Image für:
+Jeder Push auf `feature/initial` durchläuft diese Quality Gates. Nach erfolgreichem Test
+erstellt derselbe Workflow automatisch den nächsten Development-Tag der Form:
+
+```text
+v0.1.1-dev.N
+```
+
+Die Release-Basis wird aus der PEP-440-Development-Version in `pyproject.toml` abgeleitet;
+`N` wird anhand der vorhandenen Tags atomar pro seriell laufendem Branch-Workflow
+hochgezählt. `v0.1.0` bleibt der bereits veröffentlichte Ausgangsstand; die
+Development-Reihe bereitet deshalb semantisch korrekt `v0.1.1` vor.
+
+Der getestete Development-Tag sowie jeder manuell gepushte stabile `v*`-Tag bauen ein
+Multi-Arch-Image für:
 
 ```text
 linux/amd64
@@ -3973,7 +3995,6 @@ Noch nicht:
 ```text
 Shadow STT
 Cascade Fallback
-Inbound
 voicemail message
 multi-agent
 large scale

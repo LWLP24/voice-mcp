@@ -65,7 +65,7 @@ class CallRepository(Protocol):
         role: Literal["user", "assistant"],
         text: str,
         interrupted: bool = False,
-        state: ActiveCallState | None = None,
+        last_remote_utterance: str | None = None,
     ) -> TranscriptTurn: ...
 
     async def list_transcript(self, call_id: str) -> list[TranscriptTurn]: ...

@@ -18,6 +18,8 @@ COPY config ./config
 COPY migrations ./migrations
 RUN uv sync --frozen --no-dev
 
-ENV PATH="/app/.venv/bin:$PATH"
+ARG CALLTOOL_VERSION=0.1.1-dev.local
+ENV CALLTOOL_VERSION=${CALLTOOL_VERSION} \
+    PATH="/app/.venv/bin:$PATH"
 ENTRYPOINT ["calltool"]
 CMD ["api"]

@@ -281,6 +281,9 @@ class CallService:
             expected_statuses={CallStatus.INPUT_REQUIRED},
         )
 
+    async def get_input_request(self, input_request_id: str) -> InputRequest | None:
+        return await self._repository.get_input_request(input_request_id)
+
     async def request_input(self, call_id: str, question: str, options: list[str]) -> InputRequest:
         call = await self.get_call(call_id)
         request = InputRequest(

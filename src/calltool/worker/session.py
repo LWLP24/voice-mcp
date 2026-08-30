@@ -7,9 +7,8 @@ from typing import Any
 
 from livekit.agents import AgentSession
 
-from calltool.calls.errors import InvalidStateTransitionError
-from calltool.calls.repository import CallRepository
 from calltool.observability.metrics import BARGE_IN_LATENCY, TURN_LATENCY
+from calltool.realtime.active_calls import ActiveCallContext
 from calltool.voice.watchdog import UnrecoverableHandler, VoiceWatchdog
 
 
@@ -17,8 +16,7 @@ class SessionObserver:
     def __init__(
         self,
         session: AgentSession[Any],
-        repository: CallRepository,
-        call_id: str,
+        context: ActiveCallContext,
         *,
         persist_transcript: bool,
         watchdog_silence_seconds: float,
@@ -27,8 +25,7 @@ class SessionObserver:
         on_unrecoverable: UnrecoverableHandler,
     ) -> None:
         self._session = session
-        self._repository = repository
-        self._call_id = call_id
+        self._context = context
         self._persist_transcript_enabled = persist_transcript
         self._tasks: set[asyncio.Task[None]] = set()
         self._transcript_lock = asyncio.Lock()
@@ -143,49 +140,25 @@ class SessionObserver:
         task.add_done_callback(self._tasks.discard)
 
     async def persist(self, event_type: str, payload: dict[str, object]) -> None:
-        call = await self._repository.get_call(self._call_id)
-        if call is None or call.status.terminal:
+        if self._context.status.terminal:
             return
-        try:
-            await self._repository.update_call(
-                call.id,
-                event_type=event_type,
-                event_payload=payload,
-                expected_statuses={call.status},
-            )
-        except InvalidStateTransitionError:
-            return
+        self._context.persist_event(event_type, payload)
 
     async def _persist_user_transcript(self, transcript: str) -> None:
         async with self._transcript_lock:
-            call = await self._repository.get_call(self._call_id)
-            if call is None or call.status.terminal or not transcript.strip():
+            if self._context.status.terminal or not transcript.strip():
                 return
-            state = call.state.model_copy(update={"last_remote_utterance": transcript})
-            try:
-                await self._repository.append_transcript_turn(
-                    call.id,
-                    role="user",
-                    text=transcript,
-                    state=state,
-                )
-            except InvalidStateTransitionError:
-                return
+            self._context.persist_transcript(role="user", text=transcript)
 
     async def _persist_assistant_transcript(self, transcript: str, *, interrupted: bool) -> None:
         async with self._transcript_lock:
-            call = await self._repository.get_call(self._call_id)
-            if call is None or call.status.terminal or not transcript.strip():
+            if self._context.status.terminal or not transcript.strip():
                 return
-            try:
-                await self._repository.append_transcript_turn(
-                    call.id,
-                    role="assistant",
-                    text=transcript,
-                    interrupted=interrupted,
-                )
-            except InvalidStateTransitionError:
-                return
+            self._context.persist_transcript(
+                role="assistant",
+                text=transcript,
+                interrupted=interrupted,
+            )
 
     async def close(self) -> None:
         await self._watchdog.close()

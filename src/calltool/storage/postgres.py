@@ -316,7 +316,7 @@ class PostgresCallRepository:
         role: Literal["user", "assistant"],
         text: str,
         interrupted: bool = False,
-        state: ActiveCallState | None = None,
+        last_remote_utterance: str | None = None,
     ) -> TranscriptTurn:
         now = utc_now()
         transcript = text.strip()
@@ -351,11 +351,21 @@ class PostgresCallRepository:
                 interrupted,
                 now,
             )
-            if state is not None:
+            if last_remote_utterance is not None:
                 await connection.execute(
-                    "UPDATE calls SET state = $2::jsonb, updated_at = $3 WHERE id = $1",
+                    """
+                    UPDATE calls
+                    SET state = jsonb_set(
+                          state,
+                          '{last_remote_utterance}',
+                          to_jsonb($2::text),
+                          true
+                        ),
+                        updated_at = $3
+                    WHERE id = $1
+                    """,
                     call_id,
-                    _json(state.model_dump(mode="json")),
+                    last_remote_utterance,
                     now,
                 )
             event_sequence = int(

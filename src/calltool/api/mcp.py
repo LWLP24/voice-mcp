@@ -17,6 +17,7 @@ from calltool.calls.models import (
     CallVoiceOptions,
 )
 from calltool.calls.service import CallService
+from calltool.version import runtime_version
 
 
 @dataclass
@@ -34,7 +35,7 @@ def build_mcp_server(slot: ServiceSlot, *, principal_id: str = "mcp") -> MCPServ
         name="calltool",
         title="CallTool",
         description="Start outbound calls and inspect inbound or outbound call history",
-        version="0.1.0",
+        version=runtime_version(),
         instructions=(
             "Calls are asynchronous. Create a call, poll phone_call.status, and answer "
             "phone_call.respond when the status is input_required. Use phone_call.list "

@@ -20,26 +20,23 @@ from calltool.calls.models import (
     Commitment,
     utc_now,
 )
-from calltool.calls.repository import CallRepository
 from calltool.calls.service import CallService
 from calltool.observability.metrics import TOOL_LATENCY
 from calltool.policy.engine import PolicyEngine
+from calltool.realtime.active_calls import ActiveCallContext
 
 
 @dataclass
 class ToolRuntime:
     call_id: str
-    repository: CallRepository
+    context: ActiveCallContext
     service: CallService
     policy: PolicyEngine
     room: rtc.Room
     finish_event: asyncio.Event
 
     async def current_state(self) -> ActiveCallState:
-        call = await self.repository.get_call(self.call_id)
-        if call is None:
-            raise RuntimeError("Call disappeared from durable storage")
-        return call.state
+        return self.context.snapshot()
 
 
 def build_tools(
@@ -51,19 +48,13 @@ def build_tools(
     async def record_fact(key: str, value: Any) -> dict[str, Any]:
         started = time.perf_counter()
         try:
-            call = await runtime.repository.get_call(runtime.call_id)
-            if call is None:
-                raise RuntimeError("call_not_found")
-            facts = dict(call.state.facts)
-            facts[key] = value
-            state = call.state.model_copy(update={"facts": facts})
-            await runtime.repository.update_call(
-                call.id,
-                state=state,
-                event_type="call.fact_recorded",
-                event_payload={"key": key, "value": value},
-                expected_statuses={CallStatus.ACTIVE, CallStatus.INPUT_REQUIRED},
-            )
+            async with runtime.context.state_transaction():
+                runtime.context.record_fact(key, value)
+                runtime.context.persist_state(
+                    event_type="call.fact_recorded",
+                    event_payload={"key": key, "value": value},
+                    expected_statuses={CallStatus.ACTIVE, CallStatus.INPUT_REQUIRED},
+                )
             return {"recorded": True, "key": key}
         finally:
             TOOL_LATENCY.labels(tool="record_fact").observe(time.perf_counter() - started)
@@ -72,28 +63,24 @@ def build_tools(
     async def propose_candidate(kind: str, value: dict[str, Any]) -> dict[str, Any]:
         started = time.perf_counter()
         try:
-            call = await runtime.repository.get_call(runtime.call_id)
-            if call is None:
-                raise RuntimeError("call_not_found")
-            action = "book_appointment" if kind == "appointment" else kind
-            decision = runtime.policy.authorize_commit(call.state, action, value)
-            candidate = Candidate(
-                id=new_id("candidate"),
-                kind=kind,
-                value=value,
-                allowed=decision.allowed,
-                denial_reason=decision.reason,
-            )
-            state = call.state.model_copy(
-                update={"candidates": [*call.state.candidates, candidate]}
-            )
-            await runtime.repository.update_call(
-                call.id,
-                state=state,
-                event_type="call.candidate_detected",
-                event_payload=candidate.model_dump(mode="json"),
-                expected_statuses={CallStatus.ACTIVE},
-            )
+            async with runtime.context.state_transaction():
+                action = "book_appointment" if kind == "appointment" else kind
+                decision = runtime.policy.authorize_commit(
+                    runtime.context.snapshot(), action, value
+                )
+                candidate = Candidate(
+                    id=new_id("candidate"),
+                    kind=kind,
+                    value=value,
+                    allowed=decision.allowed,
+                    denial_reason=decision.reason,
+                )
+                runtime.context.add_candidate(candidate)
+                runtime.context.persist_state(
+                    event_type="call.candidate_detected",
+                    event_payload=candidate.model_dump(mode="json"),
+                    expected_statuses={CallStatus.ACTIVE},
+                )
             return candidate.model_dump(mode="json")
         finally:
             TOOL_LATENCY.labels(tool="propose_candidate").observe(time.perf_counter() - started)
@@ -104,48 +91,41 @@ def build_tools(
     async def authorize_commit(action: str, payload: dict[str, Any]) -> dict[str, Any]:
         started = time.perf_counter()
         try:
-            call = await runtime.repository.get_call(runtime.call_id)
-            if call is None:
-                raise RuntimeError("call_not_found")
-            canonical = json.dumps(
-                {"action": action, "payload": payload},
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=False,
-            )
-            digest = hashlib.sha256(f"{call.id}:{canonical}".encode()).hexdigest()[:26].upper()
-            commit_id = f"commit_{digest}"
-            existing = next((item for item in call.state.commitments if item.id == commit_id), None)
-            if existing is not None:
-                return {
-                    "allowed": existing.allowed,
-                    "commit_id": existing.id,
-                    "reason": existing.reason,
-                    "idempotent_replay": True,
-                }
-            decision = runtime.policy.authorize_commit(
-                call.state, action, payload, commit_id=commit_id
-            )
-            commitment = Commitment(
-                id=decision.commit_id,
-                action=action,
-                payload=payload,
-                allowed=decision.allowed,
-                reason=decision.reason,
-                confirmed=decision.allowed,
-            )
-            state = call.state.model_copy(
-                update={"commitments": [*call.state.commitments, commitment]}
-            )
-            event_type = "call.commit_allowed" if decision.allowed else "call.commit_denied"
-            await runtime.repository.update_call(
-                call.id,
-                state=state,
-                event_type=event_type,
-                event_payload=commitment.model_dump(mode="json"),
-                expected_statuses={CallStatus.ACTIVE},
-            )
-            return decision.model_dump(mode="json")
+            async with runtime.context.state_transaction():
+                canonical = json.dumps(
+                    {"action": action, "payload": payload},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                )
+                digest = (
+                    hashlib.sha256(f"{runtime.context.call_id}:{canonical}".encode())
+                    .hexdigest()[:26]
+                    .upper()
+                )
+                commit_id = f"commit_{digest}"
+                existing = runtime.context.find_commitment(commit_id)
+                if existing is not None:
+                    return {
+                        "allowed": existing.allowed,
+                        "commit_id": existing.id,
+                        "reason": existing.reason,
+                        "idempotent_replay": True,
+                    }
+                decision = runtime.policy.authorize_commit(
+                    runtime.context.snapshot(), action, payload, commit_id=commit_id
+                )
+                commitment = Commitment(
+                    id=decision.commit_id,
+                    action=action,
+                    payload=payload,
+                    allowed=decision.allowed,
+                    reason=decision.reason,
+                    confirmed=decision.allowed,
+                )
+                event_type = "call.commit_allowed" if decision.allowed else "call.commit_denied"
+                await runtime.context.persist_commitment(commitment, event_type)
+                return decision.model_dump(mode="json")
         finally:
             TOOL_LATENCY.labels(tool="authorize_commit").observe(time.perf_counter() - started)
 
@@ -155,15 +135,25 @@ def build_tools(
     async def request_user_input(question: str, options: list[str]) -> dict[str, Any]:
         started = time.perf_counter()
         try:
-            request = await runtime.service.request_input(runtime.call_id, question, options)
+            async with runtime.context.state_transaction():
+                await runtime.context.flush()
+                request = await runtime.service.request_input(runtime.call_id, question, options)
+                runtime.context.pending_input_request_id = request.id
+                runtime.context.status = CallStatus.INPUT_REQUIRED
             while True:
-                current = await runtime.repository.get_input_request(request.id)
+                current = await runtime.service.get_input_request(request.id)
                 if current is None:
                     raise RuntimeError("input_request_disappeared")
                 if current.status == "resolved":
+                    async with runtime.context.state_transaction():
+                        runtime.context.pending_input_request_id = None
+                        runtime.context.status = CallStatus.ACTIVE
                     return current.response or {}
                 if current.expires_at and current.expires_at <= utc_now():
                     await runtime.service.expire_input(runtime.call_id, request.id)
+                    async with runtime.context.state_transaction():
+                        runtime.context.pending_input_request_id = None
+                        runtime.context.status = CallStatus.ACTIVE
                     return {"status": "timeout"}
                 await asyncio.sleep(0.25)
         finally:
@@ -200,27 +190,19 @@ def build_tools(
     ) -> dict[str, Any]:
         started = time.perf_counter()
         try:
-            call = await runtime.repository.get_call(runtime.call_id)
-            if call is None:
-                raise RuntimeError("call_not_found")
-            outcome = CallOutcome(
-                success=success,
-                reason=reason,
-                summary=summary,
-                facts=call.state.facts,
-                commitments=call.state.commitments,
-                notes=notes or [],
-            )
-            await runtime.repository.update_call(
-                call.id,
-                status=CallStatus.COMPLETING,
-                outcome=outcome,
-                event_type="call.completing",
-                event_payload={"success": success, "reason": reason},
-                expected_statuses={CallStatus.ACTIVE, CallStatus.INPUT_REQUIRED},
-            )
-            runtime.finish_event.set()
-            return {"accepted": True, "hangup_after_goodbye": True}
+            async with runtime.context.state_transaction():
+                state = runtime.context.snapshot()
+                outcome = CallOutcome(
+                    success=success,
+                    reason=reason,
+                    summary=summary,
+                    facts=state.facts,
+                    commitments=state.commitments,
+                    notes=notes or [],
+                )
+                await runtime.context.persist_completion(outcome)
+                runtime.finish_event.set()
+                return {"accepted": True, "hangup_after_goodbye": True}
         finally:
             TOOL_LATENCY.labels(tool="finish_call").observe(time.perf_counter() - started)
 

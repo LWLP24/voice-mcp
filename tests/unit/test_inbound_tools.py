@@ -8,7 +8,7 @@ from calltool.voice.tools import ToolRuntime, build_tools
 def test_inbound_call_only_exposes_safe_tools() -> None:
     runtime = ToolRuntime(
         call_id="call_test",
-        repository=MagicMock(),
+        context=MagicMock(),
         service=MagicMock(),
         policy=MagicMock(),
         room=MagicMock(),

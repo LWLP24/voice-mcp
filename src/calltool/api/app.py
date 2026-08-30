@@ -26,6 +26,7 @@ from calltool.policy.engine import PolicyEngine
 from calltool.realtime.events import build_event_dispatcher
 from calltool.storage.memory import MemoryCallRepository
 from calltool.storage.postgres import PostgresCallRepository
+from calltool.version import runtime_version
 from calltool.voice.prompts import PromptProfile
 
 logger = structlog.get_logger(__name__)
@@ -99,7 +100,7 @@ def create_app(
                 slot.service = None
 
     async def health(_: Request) -> Response:
-        return JSONResponse({"status": "ok"})
+        return JSONResponse({"status": "ok", "version": runtime_version()})
 
     async def ready(request: Request) -> Response:
         is_ready = bool(getattr(request.app.state, "ready", False))

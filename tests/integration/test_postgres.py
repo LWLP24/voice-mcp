@@ -12,6 +12,7 @@ from calltool.calls.models import (
     CallStatus,
     CallTarget,
 )
+from calltool.realtime.active_calls import ActiveCallContext
 from calltool.storage.postgres import PostgresCallRepository
 
 DATABASE_URL = os.environ.get("CALLTOOL_TEST_DATABASE_URL")
@@ -63,16 +64,16 @@ async def test_postgres_call_history_migration_and_queries() -> None:
     try:
         await repository.create_call(call)
         await repository.create_call(outbound)
-        await repository.append_transcript_turn(
-            call.id,
-            role="user",
-            text="Ich brauche einen Rückruf.",
+        context = ActiveCallContext.from_call(call, repository)
+        context.record_fact("request", "Rückruf")
+        context.persist_state(
+            "call.fact_recorded",
+            {"key": "request", "value": "Rückruf"},
+            expected_statuses={CallStatus.ACTIVE},
         )
-        await repository.append_transcript_turn(
-            call.id,
-            role="assistant",
-            text="Ich habe das aufgenommen.",
-        )
+        context.persist_transcript(role="user", text="Ich brauche einen Rückruf.")
+        context.persist_transcript(role="assistant", text="Ich habe das aufgenommen.")
+        await context.close()
         await repository.migrate()
 
         listed = await repository.list_calls(
@@ -104,6 +105,8 @@ async def test_postgres_call_history_migration_and_queries() -> None:
         assert [item.id for item in listed] == [call.id]
         assert [turn.role for turn in transcript] == ["user", "assistant"]
         assert [turn.sequence for turn in transcript] == [1, 2]
+        assert listed[0].state.facts == {"request": "Rückruf"}
+        assert listed[0].state.last_remote_utterance == "Ich brauche einen Rückruf."
         assert [item.id for item in outbound_calls] == [outbound.id]
         assert outbound_calls[0].direction is CallDirection.OUTBOUND
     finally:

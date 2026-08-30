@@ -173,7 +173,7 @@ class MemoryCallRepository:
         role: Literal["user", "assistant"],
         text: str,
         interrupted: bool = False,
-        state: ActiveCallState | None = None,
+        last_remote_utterance: str | None = None,
     ) -> TranscriptTurn:
         transcript = text.strip()
         if not transcript:
@@ -193,7 +193,11 @@ class MemoryCallRepository:
                 created_at=now,
             )
             self._transcripts[call_id].append(turn)
-            if state is not None:
+            if last_remote_utterance is not None:
+                state = call.state.model_copy(
+                    update={"last_remote_utterance": last_remote_utterance},
+                    deep=True,
+                )
                 self._calls[call_id] = call.model_copy(
                     update={"state": state, "updated_at": now}, deep=True
                 )

@@ -1,26 +1,110 @@
-name: Release container image
+name: Verify and release container image
 
 on:
   push:
+    branches:
+      - feature/initial
     tags:
-      - "*"
+      - "v*"
+  workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 concurrency:
-  group: release-image-${{ github.ref }}
+  group: release-image-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
+  quality:
+    name: Lint, type-check, and test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18.1-alpine
+        env:
+          POSTGRES_USER: calltool
+          POSTGRES_PASSWORD: calltool
+          POSTGRES_DB: calltool
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U calltool -d calltool"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13.15"
+
+      - name: Install uv
+        run: python -m pip install uv==0.12.7
+
+      - name: Install locked dependencies
+        run: uv sync --all-extras --frozen
+
+      - name: Lint
+        run: uv run ruff check src tests
+
+      - name: Type-check
+        run: uv run mypy src
+
+      - name: Test
+        env:
+          CALLTOOL_TEST_DATABASE_URL: postgresql://calltool:calltool@127.0.0.1:5432/calltool
+        run: uv run pytest -q
+
   publish:
     name: Build and publish
+    needs: quality
     runs-on: ubuntu-latest
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Create next development tag
+        id: version
+        shell: bash
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ "$REF_TYPE" == "branch" ]]; then
+            git fetch --tags --force
+            base_version="$(sed -nE 's/^version = "([0-9]+\.[0-9]+\.[0-9]+)\.dev[0-9]+"$/\1/p' pyproject.toml)"
+            if [[ -z "$base_version" ]]; then
+              echo "pyproject.toml must contain a PEP 440 development version" >&2
+              exit 1
+            fi
+            series="v${base_version}-dev."
+            latest="$(git tag --list "${series}*" --sort=-version:refname | head -n 1)"
+            suffix="${latest#"$series"}"
+            if [[ "$suffix" =~ ^[0-9]+$ ]]; then
+              next="$((10#$suffix + 1))"
+            else
+              next="1"
+            fi
+            tag="${series}${next}"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag --annotate "$tag" --message "CallTool $tag"
+            git push origin "$tag"
+          else
+            tag="$REF_NAME"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
 
       - name: Normalize image name
         id: image
@@ -45,12 +129,13 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ${{ steps.image.outputs.name }}
-          flavor: latest=auto
+          flavor: latest=false
           tags: |
-            type=ref,event=tag
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
+            type=raw,value=${{ steps.version.outputs.tag }}
+            type=semver,pattern={{version}},value=${{ steps.version.outputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.version.outputs.tag }},enable=${{ !contains(steps.version.outputs.tag, '-dev.') }}
+            type=semver,pattern={{major}},value=${{ steps.version.outputs.tag }},enable=${{ !contains(steps.version.outputs.tag, '-dev.') }}
+            type=raw,value=latest,enable=${{ !contains(steps.version.outputs.tag, '-dev.') }}
           labels: |
             org.opencontainers.image.title=CallTool
             org.opencontainers.image.description=Self-hosted MCP and REST telephone execution service
@@ -63,6 +148,8 @@ jobs:
           push: true
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
+          build-args: |
+            CALLTOOL_VERSION=${{ steps.version.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: mode=max

@@ -27,12 +27,17 @@ def build_app() -> Starlette:
 
 
 @pytest.mark.asyncio
-async def test_health_is_public_and_calls_require_auth() -> None:
+async def test_health_is_public_and_calls_require_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CALLTOOL_VERSION", "v0.1.1-dev.17")
     app = build_app()
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            assert (await client.get("/health")).status_code == 200
+            health = await client.get("/health")
+            assert health.status_code == 200
+            assert health.json() == {"status": "ok", "version": "0.1.1-dev.17"}
             assert (await client.get("/ready")).json() == {"status": "ready"}
             assert (await client.post("/v1/calls", json={})).status_code == 401
 

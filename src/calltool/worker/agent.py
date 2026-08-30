@@ -21,6 +21,7 @@ from calltool.calls.models import (
 from calltool.calls.service import CallService
 from calltool.config import Settings
 from calltool.policy.engine import PolicyEngine
+from calltool.realtime.active_calls import ActiveCallContext
 from calltool.realtime.events import build_event_dispatcher
 from calltool.storage.postgres import PostgresCallRepository
 from calltool.voice.realtime import build_voice_runtime
@@ -59,6 +60,7 @@ async def handle_call(ctx: JobContext, settings: Settings) -> None:
     )
     supervisor: GeminiSupervisor | None = None
     observer: SessionObserver | None = None
+    active_context: ActiveCallContext | None = None
     greeting_task: asyncio.Task[rtc.AudioFrame] | None = None
     try:
         if inbound:
@@ -101,9 +103,10 @@ async def handle_call(ctx: JobContext, settings: Settings) -> None:
             await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
 
         finish_event = asyncio.Event()
+        active_context = ActiveCallContext.from_call(call, repository)
         tool_runtime = ToolRuntime(
             call_id=call.id,
-            repository=repository,
+            context=active_context,
             service=service,
             policy=PolicyEngine(settings.config.policy),
             room=ctx.room,
@@ -126,6 +129,7 @@ async def handle_call(ctx: JobContext, settings: Settings) -> None:
                 event_type="call.dialing",
                 expected_statuses={CallStatus.PREWARMING},
             )
+            active_context.apply_call(call)
             dial_task = asyncio.create_task(dial_call(ctx, call, settings))
             call = await repository.update_call(
                 call.id,
@@ -133,6 +137,7 @@ async def handle_call(ctx: JobContext, settings: Settings) -> None:
                 event_type="call.ringing",
                 expected_statuses={CallStatus.DIALING},
             )
+            active_context.apply_call(call)
             try:
                 await dial_task
             except api.SipCallError as exc:
@@ -168,6 +173,7 @@ async def handle_call(ctx: JobContext, settings: Settings) -> None:
                 event_payload={"direction": CallDirection.OUTBOUND.value},
                 expected_statuses={CallStatus.RINGING},
             )
+            active_context.apply_call(call)
 
         disconnected = asyncio.Event()
 
@@ -200,8 +206,7 @@ async def handle_call(ctx: JobContext, settings: Settings) -> None:
 
         observer = SessionObserver(
             voice.session,
-            repository,
-            call.id,
+            active_context,
             persist_transcript=settings.config.storage.transcript,
             watchdog_silence_seconds=settings.config.performance.watchdog_silence_seconds,
             watchdog_recovery_instruction=voice.prompt_profile.watchdog_instruction(
@@ -220,6 +225,7 @@ async def handle_call(ctx: JobContext, settings: Settings) -> None:
             event_type="call.active",
             expected_statuses={CallStatus.CONNECTED},
         )
+        active_context.apply_call(call)
 
         if greeting_task is not None:
             greeting_audio = await greeting_task
@@ -242,6 +248,12 @@ async def handle_call(ctx: JobContext, settings: Settings) -> None:
                 async with asyncio.timeout(15):
                     await voice.session.wait_for_idle()
         elif end_reason == "watchdog":
+            voice.session.shutdown(drain=False)
+            await observer.close()
+            observer = None
+            with suppress(Exception):
+                await active_context.close()
+            active_context = None
             current = await repository.get_call(call.id)
             if current is not None and not current.status.terminal:
                 await repository.update_call(
@@ -256,13 +268,14 @@ async def handle_call(ctx: JobContext, settings: Settings) -> None:
                     event_payload={"code": "voice_watchdog_unrecoverable"},
                     expected_statuses={current.status},
                 )
-            voice.session.shutdown(drain=False)
             ctx.shutdown("voice watchdog unrecoverable")
             return
 
         voice.session.shutdown(drain=True)
         await observer.close()
         observer = None
+        await active_context.close()
+        active_context = None
         await _complete_call(
             repository,
             supervisor,
@@ -272,6 +285,14 @@ async def handle_call(ctx: JobContext, settings: Settings) -> None:
         ctx.shutdown("call completed")
     except Exception as exc:
         logger.exception("call worker failed", call_id=call_id)
+        if observer is not None:
+            with suppress(Exception):
+                await observer.close()
+            observer = None
+        if active_context is not None:
+            with suppress(Exception):
+                await active_context.close()
+            active_context = None
         if isinstance(call_id, str):
             current = await repository.get_call(call_id)
             if current is not None and not current.status.terminal:
@@ -296,6 +317,8 @@ async def handle_call(ctx: JobContext, settings: Settings) -> None:
                 await greeting_task
         if observer is not None:
             await observer.close()
+        if active_context is not None:
+            await active_context.close()
         if supervisor is not None:
             await supervisor.close()
         await service.close()
