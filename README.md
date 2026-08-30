@@ -357,6 +357,53 @@ the greeting from `config/prompts/default/greeting-inbound.txt` or the selected 
 prompt profile. The first inbound call should be made only after the Telnyx number is
 assigned to the SIP Connection and the bootstrap has completed.
 
+## Durable call history and conversations
+
+PostgreSQL is the source of truth for every inbound and outbound call. The `calls.direction`
+column distinguishes `inbound` from `outbound`; `created_at`, `connected_at`, and `ended_at`
+record when the job arrived, when the telephone conversation actually started, and when it
+ended. History searches use `started_at`, which means `connected_at` when available and
+otherwise `created_at` for unanswered or not-yet-connected calls.
+
+`phone_call.list` returns both directions newest-first by default. It can filter by
+`direction`, exact `phone_number`, case-insensitive partial `target_name`, `status`, and a
+time window. `started_after` is inclusive, `started_before` is exclusive, and both require
+an ISO 8601 timezone. Use `next_cursor` unchanged to fetch the next page. For example, an
+agent can find the latest outbound call to a doctor with:
+
+```json
+{
+  "direction": "outbound",
+  "target_name": "Arzt",
+  "limit": 1
+}
+```
+
+To list inbound caller IDs from a defined period:
+
+```json
+{
+  "direction": "inbound",
+  "started_after": "2026-08-01T00:00:00+02:00",
+  "started_before": "2026-09-01T00:00:00+02:00",
+  "limit": 50
+}
+```
+
+Pass a returned `call_id` to `phone_call.conversation`. It returns the full call record,
+timing and duration, structured `summary` and `facts`, and the ordered user/assistant text
+transcript. The equivalent REST endpoints are:
+
+```text
+GET /v1/calls
+GET /v1/calls/{call_id}/conversation
+```
+
+Text transcripts are enabled through `storage.transcript: true` in
+`config/calltool.yaml`; audio recording remains disabled. Set transcript storage to
+`false` if full conversation text must not be retained. Existing calls and events remain
+in PostgreSQL across container restarts through the Compose volume.
+
 ### Local development without the full Compose stack
 
 If only the API is being developed locally, install Python 3.13.15 and `uv`:

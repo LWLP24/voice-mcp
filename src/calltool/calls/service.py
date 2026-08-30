@@ -1,23 +1,30 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hashlib
-from datetime import timedelta
+import json
+from datetime import datetime, timedelta
 
 from calltool.calls.dispatcher import CallDispatcher
 from calltool.calls.errors import (
     CallNotFoundError,
     DispatchError,
     InputRequestNotFoundError,
+    InvalidCursorError,
     InvalidStateTransitionError,
 )
 from calltool.calls.ids import new_id
 from calltool.calls.models import (
     ActiveCallState,
+    CallConversation,
     CallCreateRequest,
     CallDirection,
     CallError,
     CallEvent,
+    CallListPage,
+    CallListRequest,
     CallPermissions,
     CallPhase,
     CallRecord,
@@ -211,6 +218,32 @@ class CallService:
         await self.get_call(call_id, principal_id=principal_id)
         return await self._repository.list_events(call_id, after_sequence=after_sequence)
 
+    async def list_calls(self, query: CallListRequest, *, principal_id: str) -> CallListPage:
+        cursor_started_at, cursor_call_id = _decode_call_cursor(query.cursor)
+        calls = await self._repository.list_calls(
+            principal_id=principal_id,
+            direction=query.direction,
+            status=query.status,
+            phone_number=query.phone_number,
+            target_name=query.target_name,
+            started_after=query.started_after,
+            started_before=query.started_before,
+            cursor_started_at=cursor_started_at,
+            cursor_call_id=cursor_call_id,
+            limit=query.limit + 1,
+        )
+        page = calls[: query.limit]
+        next_cursor = None
+        if len(calls) > query.limit and page:
+            last_call = page[-1]
+            next_cursor = _encode_call_cursor(last_call.started_at, last_call.id)
+        return CallListPage(calls=page, next_cursor=next_cursor)
+
+    async def get_conversation(self, call_id: str, *, principal_id: str) -> CallConversation:
+        call = await self.get_call(call_id, principal_id=principal_id)
+        transcript = await self._repository.list_transcript(call.id)
+        return CallConversation(call=call, transcript=transcript)
+
     async def cancel_call(self, call_id: str, *, principal_id: str) -> CallRecord:
         call = await self.get_call(call_id, principal_id=principal_id)
         if call.status.terminal:
@@ -313,3 +346,26 @@ class CallService:
     async def close(self) -> None:
         await self._dispatcher.close()
         await self._repository.close()
+
+
+def _encode_call_cursor(started_at: datetime, call_id: str) -> str:
+    payload = json.dumps(
+        {"started_at": started_at.isoformat(), "call_id": call_id},
+        separators=(",", ":"),
+    ).encode()
+    return base64.urlsafe_b64encode(payload).decode().rstrip("=")
+
+
+def _decode_call_cursor(cursor: str | None) -> tuple[datetime | None, str | None]:
+    if cursor is None:
+        return None, None
+    try:
+        padding = "=" * (-len(cursor) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(cursor + padding))
+        started_at = datetime.fromisoformat(payload["started_at"])
+        call_id = payload["call_id"]
+        if started_at.tzinfo is None or not isinstance(call_id, str) or not call_id:
+            raise ValueError
+    except (binascii.Error, KeyError, TypeError, UnicodeError, ValueError) as exc:
+        raise InvalidCursorError("Invalid call list cursor") from exc
+    return started_at, call_id

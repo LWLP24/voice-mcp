@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Collection
+from datetime import datetime
+from typing import Literal
 
 from calltool.calls.errors import (
     CallNotFoundError,
@@ -10,6 +12,7 @@ from calltool.calls.errors import (
 )
 from calltool.calls.models import (
     ActiveCallState,
+    CallDirection,
     CallError,
     CallEvent,
     CallOutcome,
@@ -17,6 +20,7 @@ from calltool.calls.models import (
     CallRecord,
     CallStatus,
     InputRequest,
+    TranscriptTurn,
     utc_now,
 )
 
@@ -25,6 +29,7 @@ class MemoryCallRepository:
     def __init__(self) -> None:
         self._calls: dict[str, CallRecord] = {}
         self._events: dict[str, list[CallEvent]] = {}
+        self._transcripts: dict[str, list[TranscriptTurn]] = {}
         self._input_requests: dict[str, InputRequest] = {}
         self._lock = asyncio.Lock()
 
@@ -38,6 +43,7 @@ class MemoryCallRepository:
             self._events[call.id] = [
                 CallEvent(call_id=call.id, sequence=1, type="call.created", payload={})
             ]
+            self._transcripts[call.id] = []
             return call.model_copy(deep=True)
 
     async def get_call(self, call_id: str) -> CallRecord | None:
@@ -55,8 +61,7 @@ class MemoryCallRepository:
             (
                 call
                 for call in self._calls.values()
-                if call.principal_id == principal_id
-                and call.client_request_id == client_request_id
+                if call.principal_id == principal_id and call.client_request_id == client_request_id
             ),
             None,
         )
@@ -122,6 +127,93 @@ class MemoryCallRepository:
             if event.sequence > after_sequence
         ]
 
+    async def list_calls(
+        self,
+        *,
+        principal_id: str,
+        direction: CallDirection | None,
+        status: CallStatus | None,
+        phone_number: str | None,
+        target_name: str | None,
+        started_after: datetime | None,
+        started_before: datetime | None,
+        cursor_started_at: datetime | None,
+        cursor_call_id: str | None,
+        limit: int,
+    ) -> list[CallRecord]:
+        calls = [
+            call
+            for call in self._calls.values()
+            if call.principal_id == principal_id
+            and (direction is None or call.direction is direction)
+            and (status is None or call.status is status)
+            and (phone_number is None or call.target_number == phone_number)
+            and (
+                target_name is None
+                or (
+                    call.request.target.name is not None
+                    and target_name.casefold() in call.request.target.name.casefold()
+                )
+            )
+            and (started_after is None or call.started_at >= started_after)
+            and (started_before is None or call.started_at < started_before)
+            and (
+                cursor_started_at is None
+                or cursor_call_id is None
+                or (call.started_at, call.id) < (cursor_started_at, cursor_call_id)
+            )
+        ]
+        calls.sort(key=lambda call: (call.started_at, call.id), reverse=True)
+        return [call.model_copy(deep=True) for call in calls[:limit]]
+
+    async def append_transcript_turn(
+        self,
+        call_id: str,
+        *,
+        role: Literal["user", "assistant"],
+        text: str,
+        interrupted: bool = False,
+        state: ActiveCallState | None = None,
+    ) -> TranscriptTurn:
+        transcript = text.strip()
+        if not transcript:
+            raise ValueError("transcript text must not be empty")
+        async with self._lock:
+            call = self._calls.get(call_id)
+            if call is None:
+                raise CallNotFoundError(call_id)
+            now = utc_now()
+            sequence = len(self._transcripts[call_id]) + 1
+            turn = TranscriptTurn(
+                call_id=call_id,
+                sequence=sequence,
+                role=role,
+                text=transcript,
+                interrupted=interrupted,
+                created_at=now,
+            )
+            self._transcripts[call_id].append(turn)
+            if state is not None:
+                self._calls[call_id] = call.model_copy(
+                    update={"state": state, "updated_at": now}, deep=True
+                )
+            event_sequence = len(self._events[call_id]) + 1
+            self._events[call_id].append(
+                CallEvent(
+                    call_id=call_id,
+                    sequence=event_sequence,
+                    type=f"call.{role}_transcript_final",
+                    payload={"transcript": transcript, "interrupted": interrupted},
+                    created_at=now,
+                )
+            )
+            return turn.model_copy(deep=True)
+
+    async def list_transcript(self, call_id: str) -> list[TranscriptTurn]:
+        if call_id not in self._calls:
+            raise CallNotFoundError(call_id)
+        return [turn.model_copy(deep=True) for turn in self._transcripts[call_id]]
+
     async def count_in_progress(self, principal_id: str | None = None) -> int:
         return sum(
             1
@@ -177,9 +269,7 @@ class MemoryCallRepository:
             self._input_requests[request_id] = request
             return request.model_copy(deep=True)
 
-    async def expire_input_request(
-        self, call_id: str, request_id: str
-    ) -> InputRequest:
+    async def expire_input_request(self, call_id: str, request_id: str) -> InputRequest:
         async with self._lock:
             request = self._input_requests.get(request_id)
             if request is None or request.call_id != call_id:

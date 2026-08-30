@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Collection
-from typing import Protocol
+from datetime import datetime
+from typing import Literal, Protocol
 
 from calltool.calls.models import (
     ActiveCallState,
+    CallDirection,
     CallError,
     CallEvent,
     CallOutcome,
@@ -12,6 +14,7 @@ from calltool.calls.models import (
     CallRecord,
     CallStatus,
     InputRequest,
+    TranscriptTurn,
 )
 
 
@@ -20,7 +23,9 @@ class CallRepository(Protocol):
 
     async def get_call(self, call_id: str) -> CallRecord | None: ...
 
-    async def get_by_idempotency(self, principal_id: str, client_request_id: str) -> CallRecord | None: ...
+    async def get_by_idempotency(
+        self, principal_id: str, client_request_id: str
+    ) -> CallRecord | None: ...
 
     async def update_call(
         self,
@@ -38,6 +43,33 @@ class CallRepository(Protocol):
 
     async def list_events(self, call_id: str, *, after_sequence: int = 0) -> list[CallEvent]: ...
 
+    async def list_calls(
+        self,
+        *,
+        principal_id: str,
+        direction: CallDirection | None,
+        status: CallStatus | None,
+        phone_number: str | None,
+        target_name: str | None,
+        started_after: datetime | None,
+        started_before: datetime | None,
+        cursor_started_at: datetime | None,
+        cursor_call_id: str | None,
+        limit: int,
+    ) -> list[CallRecord]: ...
+
+    async def append_transcript_turn(
+        self,
+        call_id: str,
+        *,
+        role: Literal["user", "assistant"],
+        text: str,
+        interrupted: bool = False,
+        state: ActiveCallState | None = None,
+    ) -> TranscriptTurn: ...
+
+    async def list_transcript(self, call_id: str) -> list[TranscriptTurn]: ...
+
     async def count_in_progress(self, principal_id: str | None = None) -> int: ...
 
     async def count_dispatched(self) -> int: ...
@@ -52,8 +84,6 @@ class CallRepository(Protocol):
         self, call_id: str, request_id: str, response: dict[str, object]
     ) -> InputRequest: ...
 
-    async def expire_input_request(
-        self, call_id: str, request_id: str
-    ) -> InputRequest: ...
+    async def expire_input_request(self, call_id: str, request_id: str) -> InputRequest: ...
 
     async def close(self) -> None: ...

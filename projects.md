@@ -1601,6 +1601,8 @@ Minimal und maximal kompatibel:
 ```text
 phone_call.create
 phone_call.status
+phone_call.list
+phone_call.conversation
 phone_call.respond
 phone_call.cancel
 ```
@@ -1609,7 +1611,6 @@ Optional später:
 
 ```text
 phone_call.events
-phone_call.list
 phone_call.retry
 ```
 
@@ -1712,7 +1713,9 @@ Parallel:
 
 ```text
 POST /v1/calls
+GET  /v1/calls
 GET  /v1/calls/{id}
+GET  /v1/calls/{id}/conversation
 POST /v1/calls/{id}/respond
 POST /v1/calls/{id}/cancel
 GET  /v1/calls/{id}/events
@@ -2263,6 +2266,13 @@ Der Inbound-Worker erzeugt beim Connect einen durable Call-Datensatz mit
 Testanrufe gelten standardmäßig keine Commit- oder Kostenberechtigungen. Es stehen nur
 `record_fact` und `finish_call` zur Verfügung.
 
+Inbound- und Outbound-Anrufe werden gemeinsam in PostgreSQL gespeichert. Die physische
+Spalte `calls.direction` unterscheidet `inbound` und `outbound`. `phone_call.list` sucht
+beide Richtungen standardmäßig nach Startzeit absteigend und kann nach Richtung,
+Telefonnummer, Kontaktname, Status sowie Zeitfenster filtern. Mit der zurückgegebenen
+`call_id` liefert `phone_call.conversation` das strukturierte Ergebnis, Fakten und den
+geordneten Gesprächsverlauf.
+
 ## 79. wait_until_answered
 
 Outbound Call sollte auf tatsächliche Annahme warten.
@@ -2373,8 +2383,9 @@ Minimal:
 
 ```sql
 CREATE TABLE calls (
-  id UUID PRIMARY KEY,
+  id TEXT PRIMARY KEY,
   principal_id TEXT NOT NULL,
+  direction TEXT NOT NULL CHECK (direction IN ('outbound', 'inbound')),
   client_request_id TEXT,
   status TEXT NOT NULL,
   phase TEXT,
@@ -2398,9 +2409,19 @@ CREATE TABLE call_events (
   created_at TIMESTAMPTZ NOT NULL,
   UNIQUE(call_id, sequence)
 );
+CREATE TABLE call_transcript_turns (
+  id BIGSERIAL PRIMARY KEY,
+  call_id TEXT NOT NULL REFERENCES calls(id),
+  sequence BIGINT NOT NULL,
+  role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+  text TEXT NOT NULL,
+  interrupted BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE(call_id, sequence)
+);
 CREATE TABLE input_requests (
-  id UUID PRIMARY KEY,
-  call_id UUID NOT NULL REFERENCES calls(id),
+  id TEXT PRIMARY KEY,
+  call_id TEXT NOT NULL REFERENCES calls(id),
   status TEXT NOT NULL,
   request JSONB NOT NULL,
   response JSONB,
@@ -2972,7 +2993,7 @@ performance:
 policy:
   require_commit_authorization: true
 storage:
-  transcript: false
+  transcript: true
   audio: false
 ```
 
@@ -4003,8 +4024,8 @@ provider failover
 - Commitments laufen durch Policy Engine.
 - State liegt im Worker RAM.
 - State wird durable persistiert.
-- MCP create/status/respond/cancel funktioniert.
-- REST create/status/respond/cancel funktioniert.
+- MCP create/status/list/conversation/respond/cancel funktioniert.
+- REST create/status/list/conversation/respond/cancel funktioniert.
 - Idempotency verhindert Doppelanruf.
 - Human-in-loop funktioniert.
 - Busy/No Answer/Reject werden sauber erkannt.

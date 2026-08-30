@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 from collections.abc import Collection
+from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import asyncpg
 
@@ -14,6 +15,7 @@ from calltool.calls.errors import (
 )
 from calltool.calls.models import (
     ActiveCallState,
+    CallDirection,
     CallError,
     CallEvent,
     CallOutcome,
@@ -21,6 +23,7 @@ from calltool.calls.models import (
     CallRecord,
     CallStatus,
     InputRequest,
+    TranscriptTurn,
     utc_now,
 )
 from calltool.realtime.events import EventPublisher
@@ -252,6 +255,162 @@ class PostgresCallRepository:
             )
             for row in rows
         ]
+
+    async def list_calls(
+        self,
+        *,
+        principal_id: str,
+        direction: CallDirection | None,
+        status: CallStatus | None,
+        phone_number: str | None,
+        target_name: str | None,
+        started_after: datetime | None,
+        started_before: datetime | None,
+        cursor_started_at: datetime | None,
+        cursor_call_id: str | None,
+        limit: int,
+    ) -> list[CallRecord]:
+        arguments: list[object] = [principal_id]
+        conditions = ["principal_id = $1"]
+
+        def parameter(value: object) -> str:
+            arguments.append(value)
+            return f"${len(arguments)}"
+
+        if direction is not None:
+            conditions.append(f"direction = {parameter(direction.value)}")
+        if status is not None:
+            conditions.append(f"status = {parameter(status.value)}")
+        if phone_number is not None:
+            conditions.append(f"target_number = {parameter(phone_number)}")
+        if target_name is not None:
+            conditions.append(
+                f"request->'target'->>'name' ILIKE '%' || {parameter(target_name)} || '%'"
+            )
+        if started_after is not None:
+            conditions.append(f"COALESCE(connected_at, created_at) >= {parameter(started_after)}")
+        if started_before is not None:
+            conditions.append(f"COALESCE(connected_at, created_at) < {parameter(started_before)}")
+        if cursor_started_at is not None and cursor_call_id is not None:
+            started_parameter = parameter(cursor_started_at)
+            id_parameter = parameter(cursor_call_id)
+            conditions.append(
+                f"(COALESCE(connected_at, created_at), id) < ({started_parameter}, {id_parameter})"
+            )
+        limit_parameter = parameter(limit)
+        rows = await self._pool.fetch(
+            f"""
+            SELECT * FROM calls
+            WHERE {" AND ".join(conditions)}
+            ORDER BY COALESCE(connected_at, created_at) DESC, id DESC
+            LIMIT {limit_parameter}
+            """,
+            *arguments,
+        )
+        return [self._row_to_call(row) for row in rows]
+
+    async def append_transcript_turn(
+        self,
+        call_id: str,
+        *,
+        role: Literal["user", "assistant"],
+        text: str,
+        interrupted: bool = False,
+        state: ActiveCallState | None = None,
+    ) -> TranscriptTurn:
+        now = utc_now()
+        transcript = text.strip()
+        if not transcript:
+            raise ValueError("transcript text must not be empty")
+        async with self._pool.acquire() as connection, connection.transaction():
+            current = await connection.fetchrow(
+                "SELECT id FROM calls WHERE id = $1 FOR UPDATE", call_id
+            )
+            if current is None:
+                raise CallNotFoundError(call_id)
+            sequence = int(
+                await connection.fetchval(
+                    """
+                    SELECT COALESCE(MAX(sequence), 0) + 1
+                    FROM call_transcript_turns
+                    WHERE call_id = $1
+                    """,
+                    call_id,
+                )
+            )
+            await connection.execute(
+                """
+                INSERT INTO call_transcript_turns (
+                  call_id, sequence, role, text, interrupted, created_at
+                ) VALUES ($1, $2, $3, $4, $5, $6)
+                """,
+                call_id,
+                sequence,
+                role,
+                transcript,
+                interrupted,
+                now,
+            )
+            if state is not None:
+                await connection.execute(
+                    "UPDATE calls SET state = $2::jsonb, updated_at = $3 WHERE id = $1",
+                    call_id,
+                    _json(state.model_dump(mode="json")),
+                    now,
+                )
+            event_sequence = int(
+                await connection.fetchval(
+                    "SELECT COALESCE(MAX(sequence), 0) + 1 FROM call_events WHERE call_id = $1",
+                    call_id,
+                )
+            )
+            event_type = f"call.{role}_transcript_final"
+            event_payload: dict[str, object] = {
+                "transcript": transcript,
+                "interrupted": interrupted,
+            }
+            await connection.execute(
+                """
+                INSERT INTO call_events (call_id, sequence, type, payload, created_at)
+                VALUES ($1, $2, $3, $4::jsonb, $5)
+                """,
+                call_id,
+                event_sequence,
+                event_type,
+                _json(event_payload),
+                now,
+            )
+        turn = TranscriptTurn(
+            call_id=call_id,
+            sequence=sequence,
+            role=role,
+            text=transcript,
+            interrupted=interrupted,
+            created_at=now,
+        )
+        if self._event_publisher is not None:
+            await self._event_publisher.publish(
+                CallEvent(
+                    call_id=call_id,
+                    sequence=event_sequence,
+                    type=event_type,
+                    payload=event_payload,
+                    created_at=now,
+                )
+            )
+        return turn
+
+    async def list_transcript(self, call_id: str) -> list[TranscriptTurn]:
+        rows = await self._pool.fetch(
+            """
+            SELECT call_id, sequence, role, text, interrupted, created_at
+            FROM call_transcript_turns
+            WHERE call_id = $1
+            ORDER BY sequence
+            """,
+            call_id,
+        )
+        return [TranscriptTurn.model_validate(dict(row)) for row in rows]
 
     async def count_in_progress(self, principal_id: str | None = None) -> int:
         if principal_id is None:

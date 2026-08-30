@@ -10,7 +10,7 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
 from calltool.api.mcp import ServiceSlot
-from calltool.api.schemas import call_response
+from calltool.api.schemas import call_list_response, call_response, conversation_response
 from calltool.calls.errors import (
     CallNotFoundError,
     CallToolError,
@@ -20,7 +20,7 @@ from calltool.calls.errors import (
     InvalidStateTransitionError,
     PolicyDeniedError,
 )
-from calltool.calls.models import CallCreateRequest, InputResponse
+from calltool.calls.models import CallCreateRequest, CallListRequest, InputResponse
 
 
 def build_rest_routes(slot: ServiceSlot, base_path: str) -> list[Route]:
@@ -42,6 +42,35 @@ def build_rest_routes(slot: ServiceSlot, base_path: str) -> list[Route]:
                 request.path_params["call_id"], principal_id=_principal(request)
             )
             return JSONResponse(call_response(call))
+        except Exception as exc:
+            return error_response(exc)
+
+    async def list_calls(request: Request) -> Response:
+        try:
+            supported = {
+                "direction",
+                "status",
+                "phone_number",
+                "target_name",
+                "started_after",
+                "started_before",
+                "limit",
+                "cursor",
+            }
+            query = CallListRequest.model_validate(
+                {key: value for key, value in request.query_params.items() if key in supported}
+            )
+            page = await slot.get().list_calls(query, principal_id=_principal(request))
+            return JSONResponse(call_list_response(page))
+        except Exception as exc:
+            return error_response(exc)
+
+    async def conversation(request: Request) -> Response:
+        try:
+            result = await slot.get().get_conversation(
+                request.path_params["call_id"], principal_id=_principal(request)
+            )
+            return JSONResponse(conversation_response(result))
         except Exception as exc:
             return error_response(exc)
 
@@ -115,7 +144,13 @@ def build_rest_routes(slot: ServiceSlot, base_path: str) -> list[Route]:
 
     return [
         Route(f"{base_path}/calls", create, methods=["POST"]),
+        Route(f"{base_path}/calls", list_calls, methods=["GET"]),
         Route(f"{base_path}/calls/{{call_id}}", status, methods=["GET"]),
+        Route(
+            f"{base_path}/calls/{{call_id}}/conversation",
+            conversation,
+            methods=["GET"],
+        ),
         Route(f"{base_path}/calls/{{call_id}}/respond", respond, methods=["POST"]),
         Route(f"{base_path}/calls/{{call_id}}/cancel", cancel, methods=["POST"]),
         Route(f"{base_path}/calls/{{call_id}}/events", events, methods=["GET"]),

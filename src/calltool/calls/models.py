@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from calltool.language import normalize_language_code
 
@@ -156,6 +156,62 @@ class CallRecord(BaseModel):
         if value is not None and value.tzinfo is None:
             return value.replace(tzinfo=UTC)
         return value
+
+    @property
+    def started_at(self) -> datetime:
+        return self.connected_at or self.created_at
+
+
+class CallListRequest(BaseModel):
+    direction: CallDirection | None = None
+    status: CallStatus | None = None
+    phone_number: str | None = Field(default=None, min_length=1, max_length=64)
+    target_name: str | None = Field(default=None, min_length=1, max_length=200)
+    started_after: datetime | None = None
+    started_before: datetime | None = None
+    limit: int = Field(default=50, ge=1, le=100)
+    cursor: str | None = Field(default=None, min_length=1, max_length=1_000)
+
+    @field_validator("started_after", "started_before")
+    @classmethod
+    def require_query_timezone(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("call time filters must include a timezone")
+        return value
+
+    @model_validator(mode="after")
+    def validate_time_range(self) -> CallListRequest:
+        if (
+            self.started_after is not None
+            and self.started_before is not None
+            and self.started_after >= self.started_before
+        ):
+            raise ValueError("started_after must be earlier than started_before")
+        return self
+
+
+class TranscriptTurn(BaseModel):
+    call_id: str
+    sequence: int = Field(ge=1)
+    role: Literal["user", "assistant"]
+    text: str = Field(min_length=1)
+    interrupted: bool = False
+    created_at: datetime = Field(default_factory=utc_now)
+
+    @field_validator("created_at")
+    @classmethod
+    def require_created_timezone(cls, value: datetime) -> datetime:
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+class CallListPage(BaseModel):
+    calls: list[CallRecord]
+    next_cursor: str | None = None
+
+
+class CallConversation(BaseModel):
+    call: CallRecord
+    transcript: list[TranscriptTurn]
 
 
 class CallEvent(BaseModel):

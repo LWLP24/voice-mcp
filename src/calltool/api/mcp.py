@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 
-from calltool.api.schemas import call_response
+from calltool.api.schemas import call_list_response, call_response, conversation_response
 from calltool.calls.models import (
     CallCreateRequest,
+    CallDirection,
+    CallListRequest,
     CallPermissions,
+    CallStatus,
     CallTarget,
     CallVoiceOptions,
 )
@@ -29,11 +33,12 @@ def build_mcp_server(slot: ServiceSlot, *, principal_id: str = "mcp") -> MCPServ
     server: MCPServer[None] = MCPServer(
         name="calltool",
         title="CallTool",
-        description="Start and control outbound telephone calls",
+        description="Start outbound calls and inspect inbound or outbound call history",
         version="0.1.0",
         instructions=(
             "Calls are asynchronous. Create a call, poll phone_call.status, and answer "
-            "phone_call.respond when the status is input_required."
+            "phone_call.respond when the status is input_required. Use phone_call.list "
+            "to discover inbound calls and phone_call.conversation for their details."
         ),
     )
 
@@ -73,6 +78,51 @@ def build_mcp_server(slot: ServiceSlot, *, principal_id: str = "mcp") -> MCPServ
     async def call_status(call_id: str) -> dict[str, Any]:
         call = await slot.get().get_call(call_id, principal_id=principal_id)
         return call_response(call)
+
+    @server.tool(
+        name="phone_call.list",
+        description=(
+            "List inbound and outbound calls newest-first. Supports phone/contact filters, "
+            "an inclusive started_after, exclusive started_before, and cursor pagination."
+        ),
+        structured_output=True,
+    )
+    async def list_calls(
+        direction: CallDirection | None = None,
+        status: CallStatus | None = None,
+        phone_number: str | None = None,
+        target_name: str | None = None,
+        started_after: datetime | None = None,
+        started_before: datetime | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        page = await slot.get().list_calls(
+            CallListRequest(
+                direction=direction,
+                status=status,
+                phone_number=phone_number,
+                target_name=target_name,
+                started_after=started_after,
+                started_before=started_before,
+                limit=limit,
+                cursor=cursor,
+            ),
+            principal_id=principal_id,
+        )
+        return call_list_response(page)
+
+    @server.tool(
+        name="phone_call.conversation",
+        description=(
+            "Read one call by ID with timestamps, structured outcome and facts, and the "
+            "ordered user/assistant transcript."
+        ),
+        structured_output=True,
+    )
+    async def conversation(call_id: str) -> dict[str, Any]:
+        result = await slot.get().get_conversation(call_id, principal_id=principal_id)
+        return conversation_response(result)
 
     @server.tool(
         name="phone_call.respond",

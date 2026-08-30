@@ -155,7 +155,7 @@ class PolicyConfig(BaseModel):
 
 
 class StorageConfig(BaseModel):
-    transcript: bool = False
+    transcript: bool = True
     audio: bool = False
 
 

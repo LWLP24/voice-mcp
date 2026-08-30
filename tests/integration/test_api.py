@@ -62,6 +62,10 @@ async def test_rest_call_lifecycle() -> None:
             call_id = created.json()["call_id"]
 
             status = await client.get(f"/v1/calls/{call_id}", headers=headers)
+            listed = await client.get(
+                "/v1/calls", headers=headers, params={"direction": "outbound", "limit": 10}
+            )
+            conversation = await client.get(f"/v1/calls/{call_id}/conversation", headers=headers)
             events = await client.get(f"/v1/calls/{call_id}/events", headers=headers)
             cancelled = await client.post(f"/v1/calls/{call_id}/cancel", headers=headers)
 
@@ -78,4 +82,15 @@ async def test_rest_call_lifecycle() -> None:
                 "call.queued",
                 "call.dispatched",
             ]
+            assert listed.status_code == 200
+            assert listed.json()["calls"][0]["call_id"] == call_id
+            assert listed.json()["calls"][0]["started_at"] == created.json()["created_at"]
+            assert conversation.status_code == 200
+            assert conversation.json()["call"]["call_id"] == call_id
+            assert conversation.json()["transcript"] == []
             assert cancelled.json()["status"] == "cancelled"
+
+            bad_cursor = await client.get(
+                "/v1/calls", headers=headers, params={"cursor": "not-a-cursor"}
+            )
+            assert bad_cursor.status_code == 400

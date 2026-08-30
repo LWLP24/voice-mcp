@@ -202,6 +202,7 @@ async def handle_call(ctx: JobContext, settings: Settings) -> None:
             voice.session,
             repository,
             call.id,
+            persist_transcript=settings.config.storage.transcript,
             watchdog_silence_seconds=settings.config.performance.watchdog_silence_seconds,
             watchdog_recovery_instruction=voice.prompt_profile.watchdog_instruction(
                 call, voice.selection.language

@@ -1,11 +1,15 @@
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from calltool.calls.dispatcher import NullCallDispatcher
+from calltool.calls.errors import InvalidCursorError
 from calltool.calls.models import (
     CallCreateRequest,
     CallDirection,
+    CallListRequest,
+    CallOutcome,
     CallPermissions,
     CallStatus,
     CallTarget,
@@ -174,3 +178,144 @@ async def test_inbound_call_is_connected_safe_and_idempotent() -> None:
         "call.created",
         "call.connected",
     ]
+
+
+@pytest.mark.asyncio
+async def test_inbound_history_is_time_filtered_paginated_and_has_transcript() -> None:
+    settings = make_settings()
+    repository = MemoryCallRepository()
+    service = CallService(
+        repository,
+        NullCallDispatcher(),
+        PolicyEngine(settings.config.policy),
+        settings,
+    )
+    calls = []
+    for number in ("+491701111111", "+491702222222", "+491703333333"):
+        calls.append(
+            await service.create_inbound_call(
+                caller_number=number,
+                called_number="+49301234567",
+                sip_participant_identity=f"sip-{number}",
+                room_name=f"room-{number}",
+                sip_call_id=f"telnyx-{number}",
+                principal_id="user",
+            )
+        )
+
+    await service.create_inbound_call(
+        caller_number="+491709999999",
+        called_number="+49301234567",
+        sip_participant_identity="sip-other",
+        room_name="room-other",
+        sip_call_id="telnyx-other",
+        principal_id="other",
+    )
+    await repository.append_transcript_turn(
+        calls[-1].id,
+        role="user",
+        text="Ich brauche einen Rückruf.",
+    )
+    await repository.append_transcript_turn(
+        calls[-1].id,
+        role="assistant",
+        text="Ich habe das aufgenommen.",
+    )
+
+    window_start = min(call.started_at for call in calls) - timedelta(seconds=1)
+    window_end = max(call.started_at for call in calls) + timedelta(seconds=1)
+    first_page = await service.list_calls(
+        CallListRequest(
+            started_after=window_start,
+            started_before=window_end,
+            limit=2,
+        ),
+        principal_id="user",
+    )
+    second_page = await service.list_calls(
+        CallListRequest(
+            started_after=window_start,
+            started_before=window_end,
+            limit=2,
+            cursor=first_page.next_cursor,
+        ),
+        principal_id="user",
+    )
+
+    assert len(first_page.calls) == 2
+    assert first_page.next_cursor is not None
+    assert len(second_page.calls) == 1
+    assert second_page.next_cursor is None
+    assert {call.id for call in [*first_page.calls, *second_page.calls]} == {
+        call.id for call in calls
+    }
+
+    conversation = await service.get_conversation(calls[-1].id, principal_id="user")
+    assert [turn.role for turn in conversation.transcript] == ["user", "assistant"]
+    assert [turn.text for turn in conversation.transcript] == [
+        "Ich brauche einen Rückruf.",
+        "Ich habe das aufgenommen.",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_call_history_rejects_invalid_cursor_and_naive_time() -> None:
+    settings = make_settings()
+    service = CallService(
+        MemoryCallRepository(),
+        NullCallDispatcher(),
+        PolicyEngine(settings.config.policy),
+        settings,
+    )
+
+    with pytest.raises(InvalidCursorError):
+        await service.list_calls(
+            CallListRequest(cursor="invalid"),
+            principal_id="user",
+        )
+    with pytest.raises(ValueError, match="timezone"):
+        CallListRequest(started_after=datetime(2026, 8, 29))
+
+    query = CallListRequest(started_after=datetime(2026, 8, 29, tzinfo=UTC))
+    assert query.started_after is not None
+
+
+@pytest.mark.asyncio
+async def test_call_history_searches_all_directions_by_target_name() -> None:
+    settings = make_settings()
+    repository = MemoryCallRepository()
+    service = CallService(
+        repository,
+        NullCallDispatcher(),
+        PolicyEngine(settings.config.policy),
+        settings,
+    )
+    outbound = await service.create_call(
+        CallCreateRequest(
+            target=CallTarget(phone_number="+49309876543", name="Hausarzt Dr. Müller"),
+            objective="Laborergebnis erfragen",
+        ),
+        principal_id="user",
+    )
+    outcome = CallOutcome(
+        success=True,
+        reason="information_received",
+        summary="Die Laborwerte sind unauffällig.",
+    )
+    await repository.update_call(
+        outbound.id,
+        status=CallStatus.COMPLETED,
+        outcome=outcome,
+        event_type="call.completed",
+        expected_statuses={CallStatus.QUEUED},
+    )
+
+    page = await service.list_calls(
+        CallListRequest(target_name="arzt", limit=1),
+        principal_id="user",
+    )
+
+    assert len(page.calls) == 1
+    assert page.calls[0].direction is CallDirection.OUTBOUND
+    assert page.calls[0].outcome is not None
+    assert page.calls[0].outcome.summary == "Die Laborwerte sind unauffällig."

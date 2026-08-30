@@ -33,3 +33,7 @@ class ConcurrencyLimitError(CallToolError):
 
 class DispatchError(CallToolError):
     pass
+
+
+class InvalidCursorError(CallToolError):
+    pass

@@ -80,7 +80,7 @@ policy:
   block_emergency_numbers: true
   block_premium_numbers: true
 storage:
-  transcript: false
+  transcript: true
   audio: false
 features:
   shadow_stt: false
