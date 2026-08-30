@@ -3,11 +3,20 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Coroutine
-from typing import Any
+from functools import partial
+from typing import Any, Literal
 
 from livekit.agents import AgentSession
 
-from calltool.observability.metrics import BARGE_IN_LATENCY, TURN_LATENCY
+from calltool.observability.metrics import (
+    BARGE_IN_LATENCY,
+    END_OF_TURN_DELAY,
+    INTERRUPTIONS,
+    NATIVE_METRIC_DURATION,
+    NATIVE_METRIC_EVENTS,
+    TRANSCRIPTION_DELAY,
+    TURN_LATENCY,
+)
 from calltool.realtime.active_calls import ActiveCallContext
 from calltool.voice.watchdog import UnrecoverableHandler, VoiceWatchdog
 
@@ -23,6 +32,7 @@ class SessionObserver:
         watchdog_recovery_instruction: str,
         watchdog_fallback_phrase: str,
         on_unrecoverable: UnrecoverableHandler,
+        interruption_mode: Literal["vad"] = "vad",
     ) -> None:
         self._session = session
         self._context = context
@@ -30,6 +40,7 @@ class SessionObserver:
         self._tasks: set[asyncio.Task[None]] = set()
         self._transcript_lock = asyncio.Lock()
         self._barge_in_started_at: float | None = None
+        self._interruption_mode = interruption_mode
         self._watchdog = VoiceWatchdog(
             session,
             silence_seconds=watchdog_silence_seconds,
@@ -46,12 +57,15 @@ class SessionObserver:
         self._session.on("conversation_item_added", self._on_conversation_item)
         self._session.on("tool_execution_updated", self._on_tool_update)
         self._session.on("agent_false_interruption", self._on_false_interruption)
+        self._session.on("overlapping_speech", self._on_overlapping_speech)
+        self._session.on("session_usage_updated", self._on_session_usage)
         self._session.on("error", self._on_error)
+        self._attach_native_metrics()
 
     def _on_user_state(self, event: Any) -> None:
         self._watchdog.user_state_changed(event.old_state, event.new_state)
         if event.new_state == "speaking":
-            if self._session.agent_state == "speaking":
+            if self._session.agent_state == "speaking" and self._interruption_mode == "vad":
                 self._barge_in_started_at = time.perf_counter()
             self.spawn(self.persist("call.user_speech_started", {}))
         elif event.old_state == "speaking":
@@ -81,7 +95,17 @@ class SessionObserver:
 
     def _on_conversation_item(self, event: Any) -> None:
         item = event.item
-        if getattr(item, "role", None) != "assistant":
+        role = getattr(item, "role", None)
+        metrics = getattr(item, "metrics", {})
+        if role == "user":
+            end_of_turn_delay = metrics.get("end_of_turn_delay")
+            if isinstance(end_of_turn_delay, int | float) and end_of_turn_delay >= 0:
+                END_OF_TURN_DELAY.observe(float(end_of_turn_delay))
+            transcription_delay = metrics.get("transcription_delay")
+            if isinstance(transcription_delay, int | float) and transcription_delay >= 0:
+                TRANSCRIPTION_DELAY.observe(float(transcription_delay))
+            return
+        if role != "assistant":
             return
         if self._persist_transcript_enabled:
             text = getattr(item, "text_content", None)
@@ -92,7 +116,6 @@ class SessionObserver:
                         interrupted=bool(getattr(item, "interrupted", False)),
                     )
                 )
-        metrics = getattr(item, "metrics", {})
         latency = metrics.get("e2e_latency")
         if isinstance(latency, int | float) and latency >= 0:
             TURN_LATENCY.observe(float(latency))
@@ -124,7 +147,57 @@ class SessionObserver:
             )
 
     def _on_false_interruption(self, event: Any) -> None:
-        self.spawn(self.persist("call.false_interruption", {"resumed": bool(event.resumed)}))
+        INTERRUPTIONS.labels(result="false").inc()
+        self.spawn(
+            self.persist(
+                "call.false_interruption_detected",
+                {"resumed": bool(event.resumed)},
+            )
+        )
+
+    def _on_overlapping_speech(self, event: Any) -> None:
+        if not bool(event.is_interruption):
+            INTERRUPTIONS.labels(result="backchannel").inc()
+            return
+        INTERRUPTIONS.labels(result="interruption").inc()
+        overlap_started_at = getattr(event, "overlap_started_at", None)
+        if isinstance(overlap_started_at, int | float):
+            elapsed = max(0.0, float(event.detected_at) - float(overlap_started_at))
+            self._barge_in_started_at = time.perf_counter() - elapsed
+        payload: dict[str, object] = {
+            "probability": float(event.probability),
+            "detection_delay_seconds": float(event.detection_delay),
+            "prediction_duration_seconds": float(event.prediction_duration),
+            "total_duration_seconds": float(event.total_duration),
+            "num_requests": int(event.num_requests),
+        }
+        self.spawn(self.persist("call.user_interruption_detected", payload))
+
+    def _on_session_usage(self, event: Any) -> None:
+        usage = [item.model_dump(mode="json") for item in event.usage.model_usage]
+        self._context.record_model_usage(usage)
+
+    def _attach_native_metrics(self) -> None:
+        sources = {
+            "llm": self._session.llm,
+            "stt": self._session.stt,
+            "tts": self._session.tts,
+            "vad": self._session.vad,
+            "turn_detector": self._session.turn_detection,
+        }
+        for source_name, source in sources.items():
+            if source is not None and hasattr(source, "on"):
+                metric_source: Any = source
+                metric_source.on("metrics_collected", partial(self._on_native_metric, source_name))
+
+    def _on_native_metric(self, source: str, metric: Any) -> None:
+        kind = str(getattr(metric, "type", type(metric).__name__))
+        NATIVE_METRIC_EVENTS.labels(source=source, kind=kind).inc()
+        duration = getattr(metric, "duration", None)
+        if duration is None:
+            duration = getattr(metric, "total_duration", None)
+        if isinstance(duration, int | float) and duration >= 0:
+            NATIVE_METRIC_DURATION.labels(source=source, kind=kind).observe(float(duration))
 
     def _on_error(self, event: Any) -> None:
         self.spawn(

@@ -554,6 +554,8 @@ Outbound-Systemprompt
 Inbound-Begrüßung
 Outbound-Begrüßung
 native Realtime-Begrüßungsanweisung
+Voicemail-Nachrichtenanweisung
+IVR-Navigationsanweisung
 Watchdog-Recovery und -Fallback
 Supervisor-Zusammenfassung
 ```
@@ -662,7 +664,14 @@ class ActiveCallContext:
     phase: str
     status: str
     connected_at: datetime | None
+    sip_participant_identity: str | None
+    voice_session: VoiceSessionState
 ```
+
+`VoiceSessionState` hält den gewählten Turn-/Interruption-Modus, IVR-Status,
+AMD-Ergebnis, Cold-Transfer-State, aggregierte Modellnutzung und den kompakten
+finalen LiveKit Session Report. Diese Daten bleiben während des Calls im RAM
+und werden als Teil des vorhandenen JSONB-Call-States durable gespeichert.
 
 Die konkrete Implementierung liegt in `src/calltool/realtime/active_calls.py`. Jeder
 LiveKit-Worker-Job besitzt genau einen solchen Kontext und einen seriellen
@@ -1079,33 +1088,12 @@ Transcript deduplizieren
 alte Session schließen
 ```
 
-## 31. LiveKit Inference Alternative für Shadow STT
+## 31. Shadow STT als optionaler Analysepfad
 
-LiveKit bietet aktuell:
-
-```text
-google/gemini-3.5-transcribe-live
-```
-
-als Streaming-STT über LiveKit Inference an.
-
-Python und Node werden unterstützt.
-
-**Quelle:**
-
-- <https://docs.livekit.io/agents/models/stt/gemini/>
-
-Für schnellen Entwicklungsstart:
-
-```text
-shadow STT via LiveKit Inference
-```
-
-Für maximale Provider-Kontrolle später:
-
-```text
-direkte Google Live Transcribe Verbindung
-```
+Shadow STT ist im v0.1-Hot-Path deaktiviert und keine Voraussetzung für
+Gesprächsführung, Turn Detection oder Barge-in. Falls er später für Captions
+und Analyse benötigt wird, wird er als separater, expliziter Provider-Pfad
+evaluiert und darf den normalen Self-Hosted-Voice-Worker nicht blockieren.
 
 ## 32. Turn Detection
 
@@ -1117,8 +1105,11 @@ Zusätzlich wird LiveKit Audio Turn Detector v1-mini als eigener Testpfad
 unterstützt:
 
 ```text
-voice.turn_detection.mode = realtime_llm
-voice.turn_detection.mode = livekit_v1_mini
+voice.realtime.turn_detection.mode = realtime_llm
+voice.realtime.turn_detection.mode = livekit_v1_mini
+voice.realtime.turn_detection.unlikely_threshold = null
+voice.realtime.turn_detection.backchannel_threshold = null
+voice.realtime.interruptions.mode = vad
 ```
 
 `livekit_v1_mini` läuft lokal und muss hinsichtlich CPU, Antwortlatenz,
@@ -1189,8 +1180,11 @@ Die Erkennung und das Stoppen der Ausgabe übernimmt primär LiveKit
 die Latenz. Der Watchdog bleibt davon getrennt: Er behandelt einen stillen oder
 festhängenden Agenten, nicht das normale Endpointing oder Barge-in.
 
-Zu testen sind insbesondere adaptive Interruption und der einfachere VAD-Modus.
-Eigene Audio-Unterbrechungslogik wird nicht parallel zu LiveKit gebaut.
+Zu testen sind der provider-native Turn-Modus sowie der lokale `v1-mini`-Pfad
+mit `vad`-Interruption. Für deutsche `v1-mini`-Tests werden die Thresholds
+gemeinsam mit False-End-of-Turns, verspäteten Antworten, False Interruptions
+und CPU-Verbrauch evaluiert. Eigene Audio-Unterbrechungslogik wird nicht
+parallel zu LiveKit gebaut.
 
 **Quelle:**
 
@@ -2247,8 +2241,8 @@ zuverlässige Zuordnung von Caller-ID, Zielnummer, Trunk und SIP Call-ID wird im
 Call-Kontext normalisiert und validiert.
 
 Krisp beziehungsweise Noise Processing ist für den vollständig Self-Hosted-
-SIP-Pfad keine v0.1-Voraussetzung. Ein späterer Cloud- oder lizenzierter
-Plugin-Pfad wird separat evaluiert.
+SIP-Pfad keine v0.1-Voraussetzung. Die Baseline bleibt ohne proprietäre
+Noise-Processing-Abhängigkeit.
 
 **Quelle:**
 
@@ -2377,8 +2371,11 @@ uncertain
 ```
 
 Die Erkennung läuft einmalig am Anfang des Calls und ist daher kein dauerhaftes
-Monitoring. Im Self-Hosted-Realtime-Setup muss geprüft werden, ob AMD einen
-separaten LLM-/STT-Classifier oder LiveKit Inference benötigt.
+Monitoring. Für den Self-Hosted-Pfad ist die Entscheidung umgesetzt: LiveKit AMD
+verwendet den vorhandenen Realtime-Input-Transcript und einen kleinen
+provider-nativen Text-Classifier (`gemini-2.5-flash-lite` oder
+`gpt-4.1-mini`). Ein zweiter STT-Stream oder zusätzlicher Inference-Dienst ist
+dafür nicht erforderlich.
 
 Default:
 
@@ -2389,8 +2386,9 @@ hangup
 oder konfigurierbar.
 
 Das Ergebnis wird in `ActiveCallContext`, Call Events, Outcome und PostgreSQL
-gespeichert. Die Entscheidung, ob aufgelegt, eine Nachricht hinterlassen oder
-ein Mensch gefragt wird, bleibt Policy-Logik von CallTool.
+gespeichert. Die Entscheidung, ob aufgelegt, weitergemacht, eine dateibasiert
+konfigurierte Nachricht hinterlassen oder über `input_required` ein Mensch
+gefragt wird, bleibt Policy-Logik von CallTool.
 
 **Quelle:**
 
@@ -2465,7 +2463,7 @@ CREATE TABLE calls (
 );
 CREATE TABLE call_events (
   id BIGSERIAL PRIMARY KEY,
-  call_id UUID NOT NULL REFERENCES calls(id),
+  call_id TEXT NOT NULL REFERENCES calls(id),
   sequence BIGINT NOT NULL,
   type TEXT NOT NULL,
   payload JSONB NOT NULL,
@@ -3342,6 +3340,14 @@ CALLTOOL_VOICE_MODEL
 CALLTOOL_VOICE_LANGUAGE
 CALLTOOL_VOICE_NAME
 CALLTOOL_PROMPT_DIR
+CALLTOOL_TURN_DETECTION_MODE
+CALLTOOL_TURN_UNLIKELY_THRESHOLD
+CALLTOOL_TURN_BACKCHANNEL_THRESHOLD
+CALLTOOL_INTERRUPTION_MODE
+CALLTOOL_IVR_ENABLED
+CALLTOOL_AMD_ENABLED
+CALLTOOL_COLD_TRANSFER_ENABLED
+CALLTOOL_KRISP_ENABLED
 CALLTOOL_API_KEY
 WEBHOOK_SIGNING_SECRET
 ```
@@ -3376,13 +3382,17 @@ OpenAI-only-Installation deaktiviert Supervisor und optionales Shadow STT.
 
 ebenfalls Gemini API.
 
-Vertex nur wenn:
+Eine optionale Vertex-Variante ist nicht Bestandteil der Self-Hosted-Baseline. Der
+Supervisor verwendet im Standard denselben Google-API-Zugang wie die übrigen
+Gemini-Komponenten.
+
+Eine separate Vertex-Integration wäre nur mit zusätzlicher:
 
 ```text
 IAM
 Enterprise Billing
 Quota Management
-Cloud Integration
+Provider-Konfiguration
 ```
 
 gewünscht werden.
@@ -3991,34 +4001,31 @@ features:
   supervisor: true
   scripted_confirmations: true
   cascade_fallback: false
-  semantic_turn_detector: false
-  livekit_turn_detector_v1_mini: false
-  ivr_detection: false
-  amd: false
-  cold_transfer: false
-  krisp: false
 voice:
-  turn_detection:
-    mode: realtime_llm
-  interruption:
-    mode: adaptive
+  realtime:
+    turn_detection:
+      mode: realtime_llm
+      unlikely_threshold: null
+      backchannel_threshold: null
+    interruptions:
+      mode: vad
 telephony:
-  amd:
-    enabled: false
   ivr:
     enabled: false
-  transfer:
-    cold_enabled: false
-  noise:
+    navigation_timeout_seconds: 120
+  amd:
+    enabled: false
+    voicemail_action: hangup
+  cold_transfer:
+    enabled: false
+  noise_processing:
     krisp_enabled: false
 ```
 
-Die genaue Konfigurationsstruktur muss beim Implementieren an die bestehende
-YAML-/Env-Konfiguration angepasst werden. Entscheidend ist die Trennung:
-LiveKit-Funktionen werden opt-in testbar, während CallTool weiterhin Policy,
-State, Persistenz und Audit kontrolliert. `semantic_turn_detector` bleibt als
-kompatibler Alias erhalten, darf aber nicht zusätzlich zum gewählten
-`turn_detection.mode` aktiv sein.
+Dies ist die implementierte Konfigurationsstruktur. Env-Overrides haben Vorrang
+vor YAML. Die alten parallelen Flags `semantic_turn_detector` und
+`livekit_turn_detector_v1_mini` werden bewusst nicht weitergeführt, damit pro
+Session technisch nur eine Turn-Detection-Strategie aktiv sein kann.
 
 ## 159. Kosten vs Performance
 
@@ -4101,6 +4108,7 @@ Policy Engine
 
 ```text
 Outbound
+Inbound
 Deutsch
 Telnyx
 max 2 Calls
@@ -4118,6 +4126,7 @@ optionales AMD für Outbound
 native LiveKit-Metriken
 Cold-Transfer-Schnittstelle vorbereitet, standardmäßig deaktiviert
 Self-Hosted ohne Krisp-Abhängigkeit
+Inbound-Trunk, Dispatch und durable Inbound-Historie
 ```
 
 Noch nicht:
@@ -4163,6 +4172,13 @@ Regression- und Lasttest-Automatisierung
 ```
 
 ## 167. Definition of Done v0.1
+
+Feature-Status für den `v0.1.1-dev.3`-Kandidaten: Die softwareseitigen Punkte
+für Turn Detection, Interruption, DTMF/IVR, AMD, native Metriken, Cold Transfer
+und Krisp-opt-out sind implementiert und automatisiert getestet. Die folgenden
+Telefonie- und Qualitätsaussagen bleiben bis zur realen Telnyx-Testmatrix und
+zum 20-Minuten-Soak Abnahmekriterien und werden nicht allein durch Unit-Tests
+als erfüllt betrachtet.
 
 - Telnyx Outbound funktioniert.
 - Telnyx Inbound funktioniert über dieselbe deutsche DID.

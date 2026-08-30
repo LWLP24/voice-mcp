@@ -55,6 +55,7 @@ class CallTarget(BaseModel):
 class CallPermissions(BaseModel):
     may_commit: bool = False
     may_accept_costs: bool = False
+    may_transfer: bool = False
     may_disclose: list[str] = Field(default_factory=list)
 
 
@@ -103,6 +104,52 @@ class Commitment(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
+class AMDCategory(StrEnum):
+    HUMAN = "human"
+    MACHINE_IVR = "machine-ivr"
+    MACHINE_VM = "machine-vm"
+    MACHINE_UNAVAILABLE = "machine-unavailable"
+    UNCERTAIN = "uncertain"
+
+
+class AMDResult(BaseModel):
+    category: AMDCategory
+    reason: str
+    transcript: str = ""
+    speech_duration_seconds: float = Field(default=0, ge=0)
+    detection_delay_seconds: float = Field(default=0, ge=0)
+    detected_at: datetime = Field(default_factory=utc_now)
+
+
+class TransferStatus(StrEnum):
+    REQUESTED = "requested"
+    ONGOING = "ongoing"
+    SUCCESSFUL = "successful"
+    FAILED = "failed"
+
+
+class ColdTransferState(BaseModel):
+    target_number: str
+    status: TransferStatus
+    transfer_id: str | None = None
+    reason: str | None = None
+    sip_status: str | None = None
+    requested_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class VoiceSessionState(BaseModel):
+    turn_detection_mode: Literal["realtime_llm", "livekit_v1_mini"] = "realtime_llm"
+    interruption_mode: Literal["vad"] = "vad"
+    turn_unlikely_threshold: float | None = None
+    turn_backchannel_threshold: float | None = None
+    ivr_detection_enabled: bool = False
+    amd: AMDResult | None = None
+    transfer: ColdTransferState | None = None
+    model_usage: list[dict[str, Any]] = Field(default_factory=list)
+    session_report: dict[str, Any] | None = None
+
+
 class ActiveCallState(BaseModel):
     objective: str
     constraints: list[str] = Field(default_factory=list)
@@ -115,6 +162,7 @@ class ActiveCallState(BaseModel):
     dispatch_id: str | None = None
     sip_participant_identity: str | None = None
     last_remote_utterance: str | None = None
+    voice_session: VoiceSessionState = Field(default_factory=VoiceSessionState)
 
 
 class CallOutcome(BaseModel):

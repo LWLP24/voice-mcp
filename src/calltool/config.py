@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import math
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 import yaml
 from pydantic import BaseModel, Field, SecretStr, field_validator
@@ -59,6 +60,18 @@ class ToggleConfig(BaseModel):
     enabled: bool = True
 
 
+class TurnDetectionConfig(BaseModel):
+    mode: Literal["realtime_llm", "livekit_v1_mini"] = "realtime_llm"
+    unlikely_threshold: float | None = Field(default=None, ge=0, le=1)
+    backchannel_threshold: float | None = Field(default=None, ge=0, le=1)
+
+
+class InterruptionConfig(BaseModel):
+    mode: Literal["vad"] = "vad"
+    min_duration_seconds: float = Field(default=0.15, ge=0)
+    false_interruption_timeout_seconds: float = Field(default=1.0, ge=0)
+
+
 class RealtimeVoiceConfig(BaseModel):
     provider: Literal["gemini", "openai"] = "gemini"
     model: str = "gemini-3.1-flash-live-preview"
@@ -69,6 +82,8 @@ class RealtimeVoiceConfig(BaseModel):
     output_transcription: bool = True
     context_compression: ToggleConfig = Field(default_factory=ToggleConfig)
     session_resumption: ToggleConfig = Field(default_factory=ToggleConfig)
+    turn_detection: TurnDetectionConfig = Field(default_factory=TurnDetectionConfig)
+    interruptions: InterruptionConfig = Field(default_factory=InterruptionConfig)
 
     @field_validator("language")
     @classmethod
@@ -103,6 +118,8 @@ class PromptProfileConfig(BaseModel):
     greeting_inbound: str = "greeting-inbound.txt"
     greeting_outbound: str = "greeting-outbound.txt"
     greeting_instruction: str = "greeting-instruction.md"
+    voicemail_instruction: str = "voicemail-instruction.md"
+    ivr_instruction: str = "ivr-instruction.md"
     watchdog_instruction: str = "watchdog-instruction.md"
     watchdog_fallback: str = "watchdog-fallback.txt"
     supervisor: str = "supervisor.md"
@@ -113,6 +130,8 @@ class PromptProfileConfig(BaseModel):
         "greeting_inbound",
         "greeting_outbound",
         "greeting_instruction",
+        "voicemail_instruction",
+        "ivr_instruction",
         "watchdog_instruction",
         "watchdog_fallback",
         "supervisor",
@@ -131,6 +150,52 @@ class VoiceConfig(BaseModel):
     shadow_stt: ShadowSTTConfig = Field(default_factory=ShadowSTTConfig)
     supervisor: SupervisorConfig = Field(default_factory=SupervisorConfig)
     prompts: PromptProfileConfig = Field(default_factory=PromptProfileConfig)
+
+
+class IVRConfig(BaseModel):
+    enabled: bool = False
+    allowed_digits: str = "0123456789*#ABCD"
+    max_digits_per_action: int = Field(default=32, ge=1, le=128)
+    inter_digit_delay_seconds: float = Field(default=0.3, ge=0, le=5)
+    navigation_timeout_seconds: int = Field(default=120, ge=5, le=1800)
+    audit_digits: bool = False
+
+    @field_validator("allowed_digits")
+    @classmethod
+    def validate_allowed_digits(cls, value: str) -> str:
+        allowed = "0123456789*#ABCD"
+        normalized = "".join(dict.fromkeys(value.upper()))
+        if not normalized or any(digit not in allowed for digit in normalized):
+            raise ValueError(f"allowed_digits may only contain {allowed}")
+        return normalized
+
+
+class AMDConfig(BaseModel):
+    enabled: bool = False
+    classifier_provider: Literal["auto", "gemini", "openai"] = "auto"
+    gemini_model: str = "gemini-2.5-flash-lite"
+    openai_model: str = "gpt-4.1-mini"
+    wait_until_finished: bool = True
+    voicemail_action: Literal["hangup", "leave_message", "continue", "request_user"] = "hangup"
+    unavailable_action: Literal["hangup", "continue"] = "hangup"
+    uncertain_action: Literal["hangup", "continue"] = "continue"
+
+
+class ColdTransferConfig(BaseModel):
+    enabled: bool = False
+    ringing_timeout_seconds: int = Field(default=30, ge=1, le=120)
+    play_dialtone: bool = False
+
+
+class NoiseProcessingConfig(BaseModel):
+    krisp_enabled: bool = False
+
+
+class TelephonyConfig(BaseModel):
+    ivr: IVRConfig = Field(default_factory=IVRConfig)
+    amd: AMDConfig = Field(default_factory=AMDConfig)
+    cold_transfer: ColdTransferConfig = Field(default_factory=ColdTransferConfig)
+    noise_processing: NoiseProcessingConfig = Field(default_factory=NoiseProcessingConfig)
 
 
 class PerformanceTargets(BaseModel):
@@ -164,7 +229,6 @@ class FeaturesConfig(BaseModel):
     supervisor: bool = True
     scripted_confirmations: bool = True
     cascade_fallback: bool = False
-    semantic_turn_detector: bool = False
 
 
 class FileConfig(BaseModel):
@@ -173,6 +237,7 @@ class FileConfig(BaseModel):
     rest: RESTConfig = Field(default_factory=RESTConfig)
     calls: CallsConfig = Field(default_factory=CallsConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
+    telephony: TelephonyConfig = Field(default_factory=TelephonyConfig)
     performance: PerformanceConfig = Field(default_factory=PerformanceConfig)
     policy: PolicyConfig = Field(default_factory=PolicyConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
@@ -213,6 +278,14 @@ class Settings(BaseSettings):
     CALLTOOL_VOICE_LANGUAGE: str = ""
     CALLTOOL_VOICE_NAME: str = ""
     CALLTOOL_PROMPT_DIR: str = ""
+    CALLTOOL_TURN_DETECTION_MODE: str = ""
+    CALLTOOL_TURN_UNLIKELY_THRESHOLD: str = ""
+    CALLTOOL_TURN_BACKCHANNEL_THRESHOLD: str = ""
+    CALLTOOL_INTERRUPTION_MODE: str = ""
+    CALLTOOL_IVR_ENABLED: str = ""
+    CALLTOOL_AMD_ENABLED: str = ""
+    CALLTOOL_COLD_TRANSFER_ENABLED: str = ""
+    CALLTOOL_KRISP_ENABLED: str = ""
     WEBHOOK_URL: str = ""
     WEBHOOK_SIGNING_SECRET: SecretStr = SecretStr("change-me")
 
@@ -252,6 +325,12 @@ class Settings(BaseSettings):
             or self.config.features.shadow_stt
         ):
             placeholders["GOOGLE_API_KEY"] = self.GOOGLE_API_KEY.get_secret_value()
+        if self.amd_enabled():
+            amd_provider = self.config.telephony.amd.classifier_provider
+            if amd_provider == "openai":
+                placeholders["OPENAI_API_KEY"] = self.OPENAI_API_KEY.get_secret_value()
+            elif amd_provider == "gemini":
+                placeholders["GOOGLE_API_KEY"] = self.GOOGLE_API_KEY.get_secret_value()
         invalid = [
             name
             for name, value in placeholders.items()
@@ -260,6 +339,92 @@ class Settings(BaseSettings):
         if invalid:
             names = ", ".join(sorted(invalid))
             raise ValueError(f"Unsafe production secrets: {names}")
+
+    def turn_detection_mode(self) -> Literal["realtime_llm", "livekit_v1_mini"]:
+        value = (
+            self.CALLTOOL_TURN_DETECTION_MODE.strip().lower()
+            or self.config.voice.realtime.turn_detection.mode
+        )
+        if value not in {"realtime_llm", "livekit_v1_mini"}:
+            raise ValueError("CALLTOOL_TURN_DETECTION_MODE must be realtime_llm or livekit_v1_mini")
+        return cast(Literal["realtime_llm", "livekit_v1_mini"], value)
+
+    def interruption_mode(self) -> Literal["vad"]:
+        value = (
+            self.CALLTOOL_INTERRUPTION_MODE.strip().lower()
+            or self.config.voice.realtime.interruptions.mode
+        )
+        if value != "vad":
+            raise ValueError(
+                "CALLTOOL_INTERRUPTION_MODE must be vad in the self-hosted build"
+            )
+        return "vad"
+
+    def turn_unlikely_threshold(self) -> float | None:
+        return self._float_override(
+            self.CALLTOOL_TURN_UNLIKELY_THRESHOLD,
+            self.config.voice.realtime.turn_detection.unlikely_threshold,
+            "CALLTOOL_TURN_UNLIKELY_THRESHOLD",
+        )
+
+    def turn_backchannel_threshold(self) -> float | None:
+        return self._float_override(
+            self.CALLTOOL_TURN_BACKCHANNEL_THRESHOLD,
+            self.config.voice.realtime.turn_detection.backchannel_threshold,
+            "CALLTOOL_TURN_BACKCHANNEL_THRESHOLD",
+        )
+
+    def ivr_enabled(self) -> bool:
+        return self._boolean_override(
+            self.CALLTOOL_IVR_ENABLED,
+            self.config.telephony.ivr.enabled,
+            "CALLTOOL_IVR_ENABLED",
+        )
+
+    def amd_enabled(self) -> bool:
+        return self._boolean_override(
+            self.CALLTOOL_AMD_ENABLED,
+            self.config.telephony.amd.enabled,
+            "CALLTOOL_AMD_ENABLED",
+        )
+
+    def cold_transfer_enabled(self) -> bool:
+        return self._boolean_override(
+            self.CALLTOOL_COLD_TRANSFER_ENABLED,
+            self.config.telephony.cold_transfer.enabled,
+            "CALLTOOL_COLD_TRANSFER_ENABLED",
+        )
+
+    def krisp_enabled(self) -> bool:
+        return self._boolean_override(
+            self.CALLTOOL_KRISP_ENABLED,
+            self.config.telephony.noise_processing.krisp_enabled,
+            "CALLTOOL_KRISP_ENABLED",
+        )
+
+    @staticmethod
+    def _boolean_override(raw_value: str, configured: bool, name: str) -> bool:
+        value = raw_value.strip().lower()
+        if not value:
+            return configured
+        if value in {"1", "true", "yes", "on"}:
+            return True
+        if value in {"0", "false", "no", "off"}:
+            return False
+        raise ValueError(f"{name} must be a boolean")
+
+    @staticmethod
+    def _float_override(raw_value: str, configured: float | None, name: str) -> float | None:
+        value = raw_value.strip()
+        if not value:
+            return configured
+        try:
+            parsed = float(value)
+        except ValueError as exc:
+            raise ValueError(f"{name} must be a number between 0 and 1") from exc
+        if not math.isfinite(parsed) or not 0 <= parsed <= 1:
+            raise ValueError(f"{name} must be a number between 0 and 1")
+        return parsed
 
 
 @lru_cache(maxsize=1)

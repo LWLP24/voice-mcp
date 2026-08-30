@@ -25,6 +25,7 @@ _SUPPORTED_PLACEHOLDERS = frozenset(
         "may_accept_costs",
         "may_commit",
         "may_disclose_json",
+        "may_transfer",
         "objective",
         "organization_name",
         "outcome_json",
@@ -86,6 +87,8 @@ class PromptProfile:
     greeting_inbound: _PromptTemplate
     greeting_outbound: _PromptTemplate
     greeting_instruction_template: _PromptTemplate
+    voicemail_instruction_template: _PromptTemplate
+    ivr_instruction_template: _PromptTemplate
     watchdog_instruction_template: _PromptTemplate
     watchdog_fallback_template: _PromptTemplate
     supervisor_template: _PromptTemplate
@@ -103,6 +106,10 @@ class PromptProfile:
             greeting_instruction_template=_PromptTemplate.load(
                 directory / config.greeting_instruction
             ),
+            voicemail_instruction_template=_PromptTemplate.load(
+                directory / config.voicemail_instruction
+            ),
+            ivr_instruction_template=_PromptTemplate.load(directory / config.ivr_instruction),
             watchdog_instruction_template=_PromptTemplate.load(
                 directory / config.watchdog_instruction
             ),
@@ -118,6 +125,8 @@ class PromptProfile:
             self.greeting_inbound.path,
             self.greeting_outbound.path,
             self.greeting_instruction_template.path,
+            self.voicemail_instruction_template.path,
+            self.ivr_instruction_template.path,
             self.watchdog_instruction_template.path,
             self.watchdog_fallback_template.path,
             self.supervisor_template.path,
@@ -144,6 +153,12 @@ class PromptProfile:
 
     def watchdog_instruction(self, call: CallRecord, language: str) -> str:
         return self.watchdog_instruction_template.render(_template_values(call, language))
+
+    def voicemail_instruction(self, call: CallRecord, language: str) -> str:
+        return self.voicemail_instruction_template.render(_template_values(call, language))
+
+    def ivr_instruction(self, call: CallRecord, language: str) -> str:
+        return self.ivr_instruction_template.render(_template_values(call, language))
 
     def watchdog_fallback(self, call: CallRecord, language: str) -> str:
         return self.watchdog_fallback_template.render(_template_values(call, language))
@@ -192,6 +207,7 @@ def _template_values(call: CallRecord, language: str) -> dict[str, str]:
         "may_accept_costs": str(request.permissions.may_accept_costs).lower(),
         "may_commit": str(request.permissions.may_commit).lower(),
         "may_disclose_json": json.dumps(request.permissions.may_disclose, ensure_ascii=False),
+        "may_transfer": str(request.permissions.may_transfer).lower(),
         "objective": request.objective,
         "organization_name": str(organization_name or "unbekannte Organisation"),
         "outcome_json": "",

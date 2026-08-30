@@ -7,16 +7,21 @@ from typing import Any
 
 import structlog
 from livekit import api, rtc
-from livekit.agents import AutoSubscribe, JobContext
+from livekit.agents import AgentSession, AutoSubscribe, JobContext
+from livekit.agents.voice import amd
 
 from calltool.api.auth import principal_for_api_key
 from calltool.calls.dispatcher import NullCallDispatcher
 from calltool.calls.models import (
+    AMDCategory,
+    AMDResult,
     CallDirection,
     CallError,
     CallOutcome,
     CallPhase,
+    CallRecord,
     CallStatus,
+    utc_now,
 )
 from calltool.calls.service import CallService
 from calltool.config import Settings
@@ -24,11 +29,11 @@ from calltool.policy.engine import PolicyEngine
 from calltool.realtime.active_calls import ActiveCallContext
 from calltool.realtime.events import build_event_dispatcher
 from calltool.storage.postgres import PostgresCallRepository
-from calltool.voice.realtime import build_voice_runtime
+from calltool.voice.realtime import VoiceRuntime, build_amd_detector, build_voice_runtime
 from calltool.voice.scripted_speech import frame_stream, pre_synthesize
 from calltool.voice.supervisor import GeminiSupervisor
-from calltool.voice.tools import ToolRuntime, build_tools
-from calltool.worker.dialer import dial_call, sip_error
+from calltool.voice.tools import ToolRuntime, TransferResult, build_tools
+from calltool.worker.dialer import dial_call, sip_error, transfer_call
 from calltool.worker.session import SessionObserver
 
 logger = structlog.get_logger(__name__)
@@ -62,6 +67,9 @@ async def handle_call(ctx: JobContext, settings: Settings) -> None:
     observer: SessionObserver | None = None
     active_context: ActiveCallContext | None = None
     greeting_task: asyncio.Task[rtc.AudioFrame] | None = None
+    voice: VoiceRuntime | None = None
+    amd_detector: amd.AMD | None = None
+    ivr_timeout_handle: asyncio.TimerHandle | None = None
     try:
         if inbound:
             await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
@@ -103,7 +111,20 @@ async def handle_call(ctx: JobContext, settings: Settings) -> None:
             await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
 
         finish_event = asyncio.Event()
+        participant_identity = (
+            participant.identity if inbound else f"callee-{call.id.removeprefix('call_').lower()}"
+        )
         active_context = ActiveCallContext.from_call(call, repository)
+        active_context.sip_participant_identity = participant_identity
+
+        async def handle_transfer(target_number: str) -> TransferResult:
+            return await transfer_call(
+                ctx,
+                participant_identity=participant_identity,
+                target_number=target_number,
+                settings=settings,
+            )
+
         tool_runtime = ToolRuntime(
             call_id=call.id,
             context=active_context,
@@ -111,21 +132,72 @@ async def handle_call(ctx: JobContext, settings: Settings) -> None:
             policy=PolicyEngine(settings.config.policy),
             room=ctx.room,
             finish_event=finish_event,
+            ivr_config=settings.config.telephony.ivr,
+            ivr_enabled=settings.ivr_enabled(),
+            cold_transfer_enabled=(
+                not inbound
+                and settings.cold_transfer_enabled()
+                and call.request.permissions.may_transfer
+            ),
+            transfer_handler=handle_transfer,
         )
         tools = build_tools(tool_runtime, direction=call.direction)
         voice = build_voice_runtime(call, settings, tools)
+        active_context.configure_voice_session(
+            turn_detection_mode=voice.turn_detection_mode,
+            interruption_mode=voice.interruption_mode,
+            ivr_detection_enabled=voice.ivr_detection_enabled,
+            turn_unlikely_threshold=voice.turn_unlikely_threshold,
+            turn_backchannel_threshold=voice.turn_backchannel_threshold,
+        )
         supervisor = GeminiSupervisor(settings, voice.prompt_profile)
         greeting = voice.prompt_profile.greeting(call, voice.selection.language)
         if voice.scripted_tts is not None:
             greeting_task = asyncio.create_task(pre_synthesize(voice.scripted_tts, greeting))
 
+        watchdog_unrecoverable = asyncio.Event()
+
+        async def on_watchdog_unrecoverable() -> None:
+            watchdog_unrecoverable.set()
+
+        observer = SessionObserver(
+            voice.session,
+            active_context,
+            persist_transcript=settings.config.storage.transcript,
+            watchdog_silence_seconds=settings.config.performance.watchdog_silence_seconds,
+            watchdog_recovery_instruction=voice.prompt_profile.watchdog_instruction(
+                call, voice.selection.language
+            ),
+            watchdog_fallback_phrase=voice.prompt_profile.watchdog_fallback(
+                call, voice.selection.language
+            ),
+            on_unrecoverable=on_watchdog_unrecoverable,
+            interruption_mode=voice.interruption_mode,
+        )
+        observer.attach()
+        await voice.session.start(
+            agent=voice.agent,
+            room=ctx.room,
+            record={
+                "audio": settings.config.storage.audio,
+                "transcript": settings.config.storage.transcript,
+                "traces": True,
+                "logs": True,
+            },
+        )
+
         if not inbound:
-            participant_identity = f"callee-{call.id.removeprefix('call_').lower()}"
-            state = call.state.model_copy(update={"sip_participant_identity": participant_identity})
+            if settings.amd_enabled():
+                amd_detector = build_amd_detector(
+                    voice,
+                    settings,
+                    participant_identity=participant_identity,
+                )
+                await amd_detector.__aenter__()
             call = await repository.update_call(
                 call.id,
                 status=CallStatus.DIALING,
-                state=state,
+                state=active_context.snapshot(),
                 event_type="call.dialing",
                 expected_statuses={CallStatus.PREWARMING},
             )
@@ -151,16 +223,17 @@ async def handle_call(ctx: JobContext, settings: Settings) -> None:
                         retryable=retryable,
                     ),
                     event_type="call.failed",
-                    event_payload={
-                        "code": code,
-                        "sip_status_code": exc.sip_status_code,
-                    },
+                    event_payload={"code": code, "sip_status_code": exc.sip_status_code},
                     expected_statuses={CallStatus.RINGING},
                 )
-                if greeting_task is not None:
-                    greeting_task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await greeting_task
+                await _close_amd(amd_detector)
+                amd_detector = None
+                await _close_voice_session(voice.session, drain=False)
+                voice = None
+                await observer.close()
+                observer = None
+                await active_context.close()
+                active_context = None
                 ctx.shutdown(code)
                 return
 
@@ -186,71 +259,82 @@ async def handle_call(ctx: JobContext, settings: Settings) -> None:
         def on_room_disconnected(*_: Any) -> None:
             disconnected.set()
 
+        @ctx.room.on("sip_dtmf_received")
+        def on_dtmf_received(event: Any) -> None:
+            payload: dict[str, object] = {"code": int(event.code)}
+            if settings.config.telephony.ivr.audit_digits:
+                payload["digit"] = str(event.digit)
+            if active_context is not None:
+                active_context.persist_event("call.dtmf_received", payload)
+
         if participant.identity not in ctx.room.remote_participants:
             disconnected.set()
 
-        await voice.session.start(
-            agent=voice.agent,
-            room=ctx.room,
-            record={
-                "audio": settings.config.storage.audio,
-                "transcript": settings.config.storage.transcript,
-                "traces": True,
-                "logs": True,
-            },
-        )
-        watchdog_unrecoverable = asyncio.Event()
-
-        async def on_watchdog_unrecoverable() -> None:
-            watchdog_unrecoverable.set()
-
-        observer = SessionObserver(
-            voice.session,
-            active_context,
-            persist_transcript=settings.config.storage.transcript,
-            watchdog_silence_seconds=settings.config.performance.watchdog_silence_seconds,
-            watchdog_recovery_instruction=voice.prompt_profile.watchdog_instruction(
-                call, voice.selection.language
-            ),
-            watchdog_fallback_phrase=voice.prompt_profile.watchdog_fallback(
-                call, voice.selection.language
-            ),
-            on_unrecoverable=on_watchdog_unrecoverable,
-        )
-        observer.attach()
+        detected_amd = await _run_amd(amd_detector, active_context)
+        amd_detector = None
         call = await repository.update_call(
             call.id,
             status=CallStatus.ACTIVE,
             phase=CallPhase.OPENING,
+            state=active_context.snapshot(),
             event_type="call.active",
             expected_statuses={CallStatus.CONNECTED},
         )
         active_context.apply_call(call)
 
-        if greeting_task is not None:
-            greeting_audio = await greeting_task
-            await voice.session.say(
-                greeting,
-                audio=frame_stream(greeting_audio),
-                allow_interruptions=True,
-            )
-        else:
-            voice.session.generate_reply(
-                instructions=voice.prompt_profile.greeting_instruction(
-                    call, voice.selection.language
-                ),
-                allow_interruptions=True,
+        await _start_initial_voice_action(
+            voice,
+            call,
+            active_context,
+            greeting,
+            greeting_task,
+            detected_amd,
+            settings,
+            finish_event,
+            service,
+            disconnected,
+        )
+        greeting_task = None
+
+        ivr_timeout = asyncio.Event()
+        if (
+            detected_amd is not None
+            and detected_amd.category is AMDCategory.MACHINE_IVR
+            and settings.ivr_enabled()
+        ):
+            ivr_timeout_handle = asyncio.get_running_loop().call_later(
+                settings.config.telephony.ivr.navigation_timeout_seconds,
+                ivr_timeout.set,
             )
 
-        end_reason = await _wait_for_call_end(disconnected, finish_event, watchdog_unrecoverable)
+        end_reason = await _wait_for_call_end(
+            disconnected,
+            finish_event,
+            watchdog_unrecoverable,
+            ivr_timeout,
+        )
+        if ivr_timeout_handle is not None:
+            ivr_timeout_handle.cancel()
+            ivr_timeout_handle = None
+        if end_reason == "ivr_timeout":
+            await _finish_amd_call(
+                active_context,
+                finish_event,
+                reason="ivr_navigation_timeout",
+                summary="Die IVR-Navigation wurde nach dem konfigurierten Timeout beendet.",
+            )
+            end_reason = "finish"
         if end_reason == "finish":
             with suppress(TimeoutError):
                 async with asyncio.timeout(15):
                     await voice.session.wait_for_idle()
         elif end_reason == "watchdog":
-            voice.session.shutdown(drain=False)
+            closed_session = voice.session
+            await _close_voice_session(closed_session, drain=False)
+            voice = None
             await observer.close()
             observer = None
+            await _persist_session_report(ctx, closed_session, active_context)
             with suppress(Exception):
                 await active_context.close()
             active_context = None
@@ -271,20 +355,32 @@ async def handle_call(ctx: JobContext, settings: Settings) -> None:
             ctx.shutdown("voice watchdog unrecoverable")
             return
 
-        voice.session.shutdown(drain=True)
+        closed_session = voice.session
+        language = voice.selection.language
+        await _close_voice_session(closed_session, drain=True)
+        voice = None
         await observer.close()
         observer = None
+        await _persist_session_report(ctx, closed_session, active_context)
         await active_context.close()
         active_context = None
         await _complete_call(
             repository,
             supervisor,
             call.id,
-            language=voice.selection.language,
+            language=language,
         )
         ctx.shutdown("call completed")
     except Exception as exc:
         logger.exception("call worker failed", call_id=call_id)
+        if amd_detector is not None:
+            with suppress(Exception):
+                await _close_amd(amd_detector)
+            amd_detector = None
+        if voice is not None:
+            with suppress(Exception):
+                await voice.session.aclose()
+            voice = None
         if observer is not None:
             with suppress(Exception):
                 await observer.close()
@@ -311,6 +407,14 @@ async def handle_call(ctx: JobContext, settings: Settings) -> None:
                     )
         ctx.shutdown("worker failure")
     finally:
+        if ivr_timeout_handle is not None:
+            ivr_timeout_handle.cancel()
+        if amd_detector is not None:
+            with suppress(Exception):
+                await _close_amd(amd_detector)
+        if voice is not None:
+            with suppress(Exception):
+                await voice.session.aclose()
         if greeting_task is not None and not greeting_task.done():
             greeting_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -322,6 +426,268 @@ async def handle_call(ctx: JobContext, settings: Settings) -> None:
         if supervisor is not None:
             await supervisor.close()
         await service.close()
+
+
+async def _close_amd(detector: amd.AMD | None) -> None:
+    if detector is not None:
+        await detector.aclose()
+
+
+async def _run_amd(
+    detector: amd.AMD | None,
+    context: ActiveCallContext,
+) -> AMDResult | None:
+    if detector is None:
+        return None
+    event_type = "call.amd_detected"
+    try:
+        prediction = await detector.execute()
+        result = AMDResult(
+            category=AMDCategory(prediction.category.value),
+            reason=prediction.reason,
+            transcript=prediction.transcript,
+            speech_duration_seconds=prediction.speech_duration,
+            detection_delay_seconds=prediction.delay,
+        )
+    except Exception as exc:
+        event_type = "call.amd_failed"
+        result = AMDResult(
+            category=AMDCategory.UNCERTAIN,
+            reason=f"amd_error:{type(exc).__name__}",
+        )
+    finally:
+        await detector.aclose()
+
+    async with context.state_transaction():
+        context.record_amd_result(result)
+        await context.persist_state_durable(
+            event_type,
+            result.model_dump(mode="json"),
+            expected_statuses={CallStatus.CONNECTED},
+        )
+    return result
+
+
+async def _start_initial_voice_action(
+    voice: VoiceRuntime,
+    call: CallRecord,
+    context: ActiveCallContext,
+    greeting: str,
+    greeting_task: asyncio.Task[rtc.AudioFrame] | None,
+    detected_amd: AMDResult | None,
+    settings: Settings,
+    finish_event: asyncio.Event,
+    service: CallService,
+    disconnected: asyncio.Event,
+) -> None:
+    category = detected_amd.category.value if detected_amd is not None else "human"
+    config = settings.config.telephony.amd
+
+    if category == "machine-ivr":
+        await _cancel_audio_task(greeting_task)
+        if settings.ivr_enabled():
+            await _speak_control_message(
+                voice,
+                voice.prompt_profile.ivr_instruction(call, voice.selection.language),
+                allow_interruptions=False,
+            )
+            return
+        await _finish_amd_call(
+            context,
+            finish_event,
+            reason="ivr_detected_but_disabled",
+            summary="Automatisches Telefonmenü erkannt; IVR-Navigation ist deaktiviert.",
+        )
+        return
+
+    action = "continue"
+    if category == "machine-vm":
+        action = config.voicemail_action
+    elif category == "machine-unavailable":
+        action = config.unavailable_action
+    elif category == "uncertain":
+        action = config.uncertain_action
+
+    if action == "request_user":
+        action = await _request_amd_decision(service, context, disconnected)
+
+    if action == "hangup":
+        await _cancel_audio_task(greeting_task)
+        await _finish_amd_call(
+            context,
+            finish_event,
+            reason=f"amd_{category}",
+            summary=f"Anruf nach AMD-Ergebnis {category} beendet.",
+        )
+        return
+    if action == "leave_message":
+        await _cancel_audio_task(greeting_task)
+        await _speak_control_message(
+            voice,
+            voice.prompt_profile.voicemail_instruction(call, voice.selection.language),
+            allow_interruptions=False,
+        )
+        with suppress(TimeoutError):
+            async with asyncio.timeout(30):
+                await voice.session.wait_for_idle()
+        await _finish_amd_call(
+            context,
+            finish_event,
+            reason="voicemail_message_left",
+            summary="Eine konfigurierte Nachricht wurde auf der Mailbox hinterlassen.",
+            success=True,
+        )
+        return
+
+    if greeting_task is not None:
+        greeting_audio = await greeting_task
+        await voice.session.say(
+            greeting,
+            audio=frame_stream(greeting_audio),
+            allow_interruptions=True,
+        )
+    else:
+        voice.session.generate_reply(
+            instructions=voice.prompt_profile.greeting_instruction(call, voice.selection.language),
+            allow_interruptions=True,
+        )
+
+
+async def _speak_control_message(
+    voice: VoiceRuntime,
+    text: str,
+    *,
+    allow_interruptions: bool,
+) -> None:
+    """Speak a deterministic control prompt without Gemini 3.1 generate_reply()."""
+    if voice.scripted_tts is not None:
+        voice.session.say(text, allow_interruptions=allow_interruptions)
+    else:
+        voice.session.generate_reply(
+            instructions=text,
+            allow_interruptions=allow_interruptions,
+        )
+
+
+async def _request_amd_decision(
+    service: CallService,
+    context: ActiveCallContext,
+    disconnected: asyncio.Event,
+) -> str:
+    request = await service.request_input(
+        context.call_id,
+        "Mailbox erkannt: auflegen, Nachricht hinterlassen oder normal fortfahren?",
+        ["hangup", "leave_message", "continue"],
+    )
+    context.pending_input_request_id = request.id
+    context.status = CallStatus.INPUT_REQUIRED
+    while not disconnected.is_set():
+        current = await service.get_input_request(request.id)
+        if current is None:
+            break
+        if current.status == "resolved":
+            context.pending_input_request_id = None
+            context.status = CallStatus.ACTIVE
+            response = current.response or {}
+            choice = response.get("choice") or response.get("action")
+            return str(choice) if choice in {"hangup", "leave_message", "continue"} else "hangup"
+        if current.expires_at and current.expires_at <= utc_now():
+            await service.expire_input(context.call_id, request.id)
+            break
+        await asyncio.sleep(0.25)
+    current = await service.get_input_request(request.id)
+    if current is not None and current.status == "pending":
+        await service.expire_input(context.call_id, request.id)
+    context.pending_input_request_id = None
+    context.status = CallStatus.ACTIVE
+    return "hangup"
+
+
+async def _cancel_audio_task(task: asyncio.Task[rtc.AudioFrame] | None) -> None:
+    if task is None or task.done():
+        return
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
+
+
+async def _finish_amd_call(
+    context: ActiveCallContext,
+    finish_event: asyncio.Event,
+    *,
+    reason: str,
+    summary: str,
+    success: bool = False,
+) -> None:
+    state = context.snapshot()
+    await context.persist_completion(
+        CallOutcome(
+            success=success,
+            reason=reason,
+            summary=summary,
+            facts=state.facts,
+            commitments=state.commitments,
+        )
+    )
+    finish_event.set()
+
+
+async def _close_voice_session(session: AgentSession[Any], *, drain: bool) -> None:
+    closed = asyncio.Event()
+
+    def on_close(_: Any) -> None:
+        closed.set()
+
+    session.on("close", on_close)
+    session.shutdown(drain=drain)
+    await closed.wait()
+
+
+async def _persist_session_report(
+    ctx: JobContext,
+    session: AgentSession[Any],
+    context: ActiveCallContext,
+) -> None:
+    session_report = ctx.make_session_report(session)
+    report = session_report.to_dict()
+    usage = report.get("usage")
+    model_usage = usage if isinstance(usage, list) else []
+    events = report.get("events")
+    event_types: dict[str, int] = {}
+    if isinstance(events, list):
+        for item in events:
+            if isinstance(item, dict):
+                event_type = str(item.get("type", "unknown"))
+                event_types[event_type] = event_types.get(event_type, 0) + 1
+    started_at = session_report.started_at
+    timestamp = session_report.timestamp
+    duration_seconds = None
+    if isinstance(started_at, int | float) and isinstance(timestamp, int | float):
+        duration_seconds = max(0.0, float(timestamp) - float(started_at))
+    summary: dict[str, Any] = {
+        "job_id": report.get("job_id"),
+        "room_id": report.get("room_id"),
+        "room": report.get("room"),
+        "sdk_version": report.get("sdk_version"),
+        "started_at": started_at,
+        "ended_at": timestamp,
+        "duration_seconds": duration_seconds,
+        "options": report.get("options"),
+        "event_counts": event_types,
+        "usage": model_usage,
+    }
+    async with context.state_transaction():
+        context.record_model_usage(model_usage)
+        context.record_session_report(summary)
+        await context.persist_state_durable(
+            "call.voice_session_reported",
+            summary,
+            expected_statuses={
+                CallStatus.ACTIVE,
+                CallStatus.INPUT_REQUIRED,
+                CallStatus.COMPLETING,
+            },
+        )
 
 
 def _job_metadata(raw_metadata: str | None) -> dict[str, Any]:
@@ -336,11 +702,13 @@ async def _wait_for_call_end(
     disconnected: asyncio.Event,
     finish: asyncio.Event,
     watchdog: asyncio.Event,
+    ivr_timeout: asyncio.Event,
 ) -> str:
     waiters = {
         asyncio.create_task(disconnected.wait()): "disconnected",
         asyncio.create_task(finish.wait()): "finish",
         asyncio.create_task(watchdog.wait()): "watchdog",
+        asyncio.create_task(ivr_timeout.wait()): "ivr_timeout",
     }
     done, pending = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
     for task in pending:

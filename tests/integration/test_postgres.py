@@ -76,6 +76,17 @@ async def test_postgres_call_history_migration_and_queries() -> None:
         await context.close()
         await repository.migrate()
 
+        call_id_type = await repository._pool.fetchval(
+            """
+            SELECT data_type
+            FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'call_events'
+              AND column_name = 'call_id'
+            """
+        )
+        assert call_id_type == "text"
+
         listed = await repository.list_calls(
             principal_id=principal_id,
             direction=CallDirection.INBOUND,

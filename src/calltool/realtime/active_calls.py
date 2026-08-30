@@ -12,6 +12,7 @@ import structlog
 
 from calltool.calls.models import (
     ActiveCallState,
+    AMDResult,
     CallDirection,
     CallOutcome,
     CallPermissions,
@@ -19,7 +20,9 @@ from calltool.calls.models import (
     CallRecord,
     CallStatus,
     Candidate,
+    ColdTransferState,
     Commitment,
+    VoiceSessionState,
 )
 from calltool.calls.repository import CallRepository
 
@@ -56,6 +59,7 @@ class ActiveCallContext:
     dispatch_id: str | None
     sip_participant_identity: str | None
     last_remote_utterance: str | None
+    voice_session: VoiceSessionState
     _repository: CallRepository = field(repr=False)
     _queue: asyncio.Queue[_PersistenceItem | None] = field(init=False, repr=False)
     _writer_task: asyncio.Task[None] = field(init=False, repr=False)
@@ -95,6 +99,7 @@ class ActiveCallContext:
             dispatch_id=state.dispatch_id,
             sip_participant_identity=state.sip_participant_identity,
             last_remote_utterance=state.last_remote_utterance,
+            voice_session=state.voice_session.model_copy(deep=True),
             _repository=repository,
         )
 
@@ -111,6 +116,7 @@ class ActiveCallContext:
             dispatch_id=self.dispatch_id,
             sip_participant_identity=self.sip_participant_identity,
             last_remote_utterance=self.last_remote_utterance,
+            voice_session=self.voice_session.model_copy(deep=True),
         )
 
     def apply_call(self, call: CallRecord) -> None:
@@ -123,6 +129,7 @@ class ActiveCallContext:
         self.room_name = call.state.room_name
         self.dispatch_id = call.state.dispatch_id
         self.sip_participant_identity = call.state.sip_participant_identity
+        self.voice_session = call.state.voice_session.model_copy(deep=True)
 
     def record_fact(self, key: str, value: Any) -> None:
         self.facts[key] = deepcopy(value)
@@ -135,6 +142,33 @@ class ActiveCallContext:
 
     def add_commitment(self, commitment: Commitment) -> None:
         self.commitments.append(commitment.model_copy(deep=True))
+
+    def configure_voice_session(
+        self,
+        *,
+        turn_detection_mode: Literal["realtime_llm", "livekit_v1_mini"],
+        interruption_mode: Literal["vad"],
+        ivr_detection_enabled: bool,
+        turn_unlikely_threshold: float | None = None,
+        turn_backchannel_threshold: float | None = None,
+    ) -> None:
+        self.voice_session.turn_detection_mode = turn_detection_mode
+        self.voice_session.interruption_mode = interruption_mode
+        self.voice_session.ivr_detection_enabled = ivr_detection_enabled
+        self.voice_session.turn_unlikely_threshold = turn_unlikely_threshold
+        self.voice_session.turn_backchannel_threshold = turn_backchannel_threshold
+
+    def record_amd_result(self, result: AMDResult) -> None:
+        self.voice_session.amd = result.model_copy(deep=True)
+
+    def record_transfer(self, transfer: ColdTransferState) -> None:
+        self.voice_session.transfer = transfer.model_copy(deep=True)
+
+    def record_model_usage(self, usage: list[dict[str, Any]]) -> None:
+        self.voice_session.model_usage = deepcopy(usage)
+
+    def record_session_report(self, report: dict[str, Any]) -> None:
+        self.voice_session.session_report = deepcopy(report)
 
     @asynccontextmanager
     async def state_transaction(self) -> AsyncIterator[None]:

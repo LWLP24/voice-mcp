@@ -7,11 +7,15 @@ import pytest
 
 from calltool.calls.models import (
     ActiveCallState,
+    AMDCategory,
+    AMDResult,
     CallCreateRequest,
     CallRecord,
     CallStatus,
     CallTarget,
+    ColdTransferState,
     Commitment,
+    TransferStatus,
 )
 from calltool.realtime.active_calls import ActiveCallContext
 from calltool.storage.memory import MemoryCallRepository
@@ -191,3 +195,50 @@ async def test_transcript_turns_are_serialized_with_hot_state() -> None:
     assert [turn.role for turn in transcript] == ["user", "assistant"]
     assert stored is not None
     assert stored.state.last_remote_utterance == "Ich brauche einen Termin."
+
+
+@pytest.mark.asyncio
+async def test_voice_telephony_state_is_hot_and_persisted_as_one_snapshot() -> None:
+    repository = MemoryCallRepository()
+    call = make_call()
+    await repository.create_call(call)
+    context = ActiveCallContext.from_call(call, repository)
+
+    context.configure_voice_session(
+        turn_detection_mode="livekit_v1_mini",
+        interruption_mode="vad",
+        ivr_detection_enabled=True,
+    )
+    context.record_amd_result(
+        AMDResult(
+            category=AMDCategory.HUMAN,
+            reason="short_speech_then_silence",
+            transcript="Hallo?",
+            speech_duration_seconds=1.2,
+            detection_delay_seconds=0.4,
+        )
+    )
+    context.record_transfer(
+        ColdTransferState(
+            target_number="+49309876543",
+            status=TransferStatus.SUCCESSFUL,
+            transfer_id="transfer_123",
+        )
+    )
+    context.record_model_usage([{"model": "gpt-realtime-2.1-mini", "input_tokens": 10}])
+    context.record_session_report({"sdk_version": "1.7.1", "event_counts": {"close": 1}})
+    await context.persist_state_durable(
+        "call.voice_session_reported",
+        {"sdk_version": "1.7.1"},
+        expected_statuses={CallStatus.ACTIVE},
+    )
+    await context.close()
+
+    stored = await repository.get_call(call.id)
+    assert stored is not None
+    assert stored.state.voice_session.turn_detection_mode == "livekit_v1_mini"
+    assert stored.state.voice_session.amd is not None
+    assert stored.state.voice_session.amd.category is AMDCategory.HUMAN
+    assert stored.state.voice_session.transfer is not None
+    assert stored.state.voice_session.transfer.status is TransferStatus.SUCCESSFUL
+    assert stored.state.voice_session.model_usage[0]["input_tokens"] == 10

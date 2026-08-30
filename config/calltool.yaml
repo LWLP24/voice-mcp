@@ -40,6 +40,16 @@ voice:
       enabled: true
     session_resumption:
       enabled: true
+    turn_detection:
+      mode: realtime_llm
+      # For livekit_v1_mini, determine these values with German eval calls.
+      # null keeps the detector defaults until that calibration exists.
+      unlikely_threshold: null
+      backchannel_threshold: null
+    interruptions:
+      mode: vad
+      min_duration_seconds: 0.15
+      false_interruption_timeout_seconds: 1.0
   scripted_tts:
     provider: gemini
     model: gemini-3.1-flash-tts-preview
@@ -61,9 +71,34 @@ voice:
     greeting_inbound: greeting-inbound.txt
     greeting_outbound: greeting-outbound.txt
     greeting_instruction: greeting-instruction.md
+    voicemail_instruction: voicemail-instruction.md
+    ivr_instruction: ivr-instruction.md
     watchdog_instruction: watchdog-instruction.md
     watchdog_fallback: watchdog-fallback.txt
     supervisor: supervisor.md
+telephony:
+  ivr:
+    enabled: false
+    allowed_digits: "0123456789*#ABCD"
+    max_digits_per_action: 32
+    inter_digit_delay_seconds: 0.3
+    navigation_timeout_seconds: 120
+    audit_digits: false
+  amd:
+    enabled: false
+    classifier_provider: auto
+    gemini_model: gemini-2.5-flash-lite
+    openai_model: gpt-4.1-mini
+    wait_until_finished: true
+    voicemail_action: hangup
+    unavailable_action: hangup
+    uncertain_action: continue
+  cold_transfer:
+    enabled: false
+    ringing_timeout_seconds: 30
+    play_dialtone: false
+  noise_processing:
+    krisp_enabled: false
 performance:
   prewarm_workers: 1
   event_queue_size: 1024
@@ -87,4 +122,3 @@ features:
   supervisor: true
   scripted_confirmations: true
   cascade_fallback: false
-  semantic_turn_detector: false

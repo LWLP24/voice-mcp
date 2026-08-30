@@ -4,8 +4,9 @@ from dataclasses import dataclass
 from typing import Any, Literal, cast
 
 from google.genai import types
-from livekit.agents import Agent, AgentSession, TurnHandlingOptions, llm, tts
+from livekit.agents import Agent, AgentSession, TurnHandlingOptions, inference, llm, tts
 from livekit.agents.types import NOT_GIVEN
+from livekit.agents.voice import amd
 from livekit.plugins import google
 from livekit.plugins import openai as livekit_openai
 from openai.types.realtime import AudioTranscription, RealtimeReasoning
@@ -44,6 +45,11 @@ class VoiceRuntime:
     selection: VoiceSelection
     prompt_profile: PromptProfile
     scripted_tts: tts.TTS[Any] | None
+    turn_detection_mode: Literal["realtime_llm", "livekit_v1_mini"]
+    interruption_mode: Literal["vad"]
+    turn_unlikely_threshold: float | None
+    turn_backchannel_threshold: float | None
+    ivr_detection_enabled: bool
 
 
 def resolve_voice_selection(
@@ -112,6 +118,11 @@ def build_voice_runtime(
     selection = resolve_voice_selection(settings, call.request.voice)
     prompt_profile = PromptProfile.load(settings)
     prompt = prompt_profile.system_prompt(call, selection.language)
+    turn_detection_mode = settings.turn_detection_mode()
+    interruption_mode = settings.interruption_mode()
+    turn_unlikely_threshold = settings.turn_unlikely_threshold()
+    turn_backchannel_threshold = settings.turn_backchannel_threshold()
+    client_side_turn_detection = turn_detection_mode == "livekit_v1_mini"
     realtime: llm.RealtimeModel
 
     if selection.provider == "openai":
@@ -131,6 +142,7 @@ def build_voice_runtime(
                 else None
             ),
             reasoning=RealtimeReasoning(effort=voice.realtime.thinking_level),
+            turn_detection=None if client_side_turn_detection else NOT_GIVEN,
         )
         scripted_tts: tts.TTS[Any] | None = None
     else:
@@ -166,6 +178,13 @@ def build_voice_runtime(
                 thinking_level=types.ThinkingLevel(voice.realtime.thinking_level.upper()),
                 include_thoughts=False,
             ),
+            realtime_input_config=(
+                types.RealtimeInputConfig(
+                    automatic_activity_detection=types.AutomaticActivityDetection(disabled=True)
+                )
+                if client_side_turn_detection
+                else NOT_GIVEN
+            ),
         )
         scripted_tts = (
             google.beta.GeminiTTS(
@@ -175,23 +194,43 @@ def build_voice_runtime(
             )
             if voice.scripted_tts.enabled
             and voice.scripted_tts.provider == "gemini"
-            and selection.language == "de"
+            and selection.provider == "gemini"
             else None
         )
 
+    turn_detection: Any = "realtime_llm"
+    if turn_detection_mode == "livekit_v1_mini":
+        detector_options: dict[str, Any] = {"version": "v1-mini"}
+        if turn_unlikely_threshold is not None:
+            detector_options["unlikely_threshold"] = {selection.language: turn_unlikely_threshold}
+        if turn_backchannel_threshold is not None:
+            detector_options["backchannel_threshold"] = {
+                selection.language: turn_backchannel_threshold
+            }
+        turn_detection = inference.TurnDetector(**detector_options)
     turn_handling: TurnHandlingOptions = {
-        "turn_detection": "realtime_llm",
+        "turn_detection": turn_detection,
         "interruption": {
             "enabled": True,
-            "min_duration": 0.15,
-            "false_interruption_timeout": 1.0,
+            "mode": interruption_mode,
+            "min_duration": voice.realtime.interruptions.min_duration_seconds,
+            "false_interruption_timeout": (
+                voice.realtime.interruptions.false_interruption_timeout_seconds
+            ),
         },
     }
+    ivr_detection_enabled = settings.ivr_enabled()
     session: AgentSession[None] = AgentSession(
+        vad=(
+            inference.VAD()
+            if client_side_turn_detection or interruption_mode == "vad"
+            else NOT_GIVEN
+        ),
         llm=realtime,
         tts=scripted_tts if scripted_tts is not None else NOT_GIVEN,
         tools=tools,
         turn_handling=turn_handling,
+        ivr_detection=ivr_detection_enabled,
         max_tool_steps=5,
     )
     agent = Agent(instructions=prompt, tools=tools)
@@ -201,4 +240,48 @@ def build_voice_runtime(
         selection=selection,
         prompt_profile=prompt_profile,
         scripted_tts=scripted_tts,
+        turn_detection_mode=turn_detection_mode,
+        interruption_mode=interruption_mode,
+        turn_unlikely_threshold=turn_unlikely_threshold,
+        turn_backchannel_threshold=turn_backchannel_threshold,
+        ivr_detection_enabled=ivr_detection_enabled,
+    )
+
+
+def build_amd_detector(
+    runtime: VoiceRuntime,
+    settings: Settings,
+    *,
+    participant_identity: str,
+) -> amd.AMD:
+    """Build LiveKit AMD with a provider-native text classifier for self-hosting."""
+    if not settings.amd_enabled():
+        raise ValueError("AMD is disabled")
+    if not settings.config.voice.realtime.input_transcription:
+        raise ValueError("AMD requires voice.realtime.input_transcription=true")
+
+    config = settings.config.telephony.amd
+    provider = (
+        runtime.selection.provider
+        if config.classifier_provider == "auto"
+        else config.classifier_provider
+    )
+    classifier: llm.LLM[Any]
+    if provider == "openai":
+        api_key = settings.OPENAI_API_KEY.get_secret_value()
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY is required for OpenAI AMD")
+        classifier = livekit_openai.LLM(model=config.openai_model, api_key=api_key)
+    else:
+        api_key = settings.GOOGLE_API_KEY.get_secret_value()
+        if not api_key:
+            raise ValueError("GOOGLE_API_KEY is required for Gemini AMD")
+        classifier = google.LLM(model=config.gemini_model, api_key=api_key)
+
+    return amd.AMD(
+        runtime.session,
+        llm=classifier,
+        participant_identity=participant_identity,
+        ivr_detection=settings.ivr_enabled(),
+        wait_until_finished=config.wait_until_finished,
     )

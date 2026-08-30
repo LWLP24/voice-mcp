@@ -92,11 +92,19 @@ blockieren.
 
 Dies ist die aktuelle Entwicklungsreihe `v0.1.1-dev.N`.
 
+Implementierungsstatus für den Feature-Kandidaten: Die nachfolgenden sieben
+Softwarepfade sind im Code, in der Konfiguration und in automatisierten Tests
+umgesetzt. Offen sind die ausdrücklich externen Abnahmen mit echten Telnyx-
+Anrufen, insbesondere der 20-Minuten-Soak, reale IVR-/Mailbox-Szenarien und die
+Freischaltung beziehungsweise Bestätigung von SIP REFER. Diese Ergebnisse sind
+das Test- und Fix-Ziel ab `v0.1.1-dev.4`.
+
 ### 1. Native Turn Detection als Testpfad
 
 - Konfigurationsschalter für `realtime_llm` und LiveKit
   `TurnDetector(version="v1-mini")`
-- `v1-mini` zunächst lokal und CPU-bewusst testen
+- `v1-mini` zunächst lokal und CPU-bewusst testen; deutsche Thresholds über
+  `unlikely_threshold` und `backchannel_threshold` anhand realer Evals kalibrieren
 - Vergleichskorpus mit kurzen Antworten, Pausen, Backchannels und
   Unterbrechungen
 - Messung von End-of-Turn, verspäteten Antworten, False Interruptions und
@@ -107,14 +115,25 @@ Dies ist die aktuelle Entwicklungsreihe `v0.1.1-dev.N`.
 Die Realtime-native Erkennung bleibt der Default, bis reale Telefonmessungen
 zeigen, dass der LiveKit-Detektor besser geeignet ist.
 
+**Code-Status:** umgesetzt. Der lokale Pfad deaktiviert die provider-native
+Endpointing-Strategie für genau diese Session und fügt den lokalen LiveKit-VAD
+sowie `TurnDetector(version="v1-mini")` hinzu. Modus, Thresholds und Session-
+Report werden im Call State gespeichert.
+
 ### 2. LiveKit-native Interruption und Barge-in
 
 - AgentSession-Interruption-Primitives verwenden und konfigurieren
-- adaptive Interruption beziehungsweise VAD als explizite Konfiguration testen
-- `user_interruption_detected` und False-Interruption-Events auswerten
+- `vad` als einzige Self-Hosted-Interruption-Strategie explizit konfigurieren
+- das in LiveKit Agents 1.7.1 verfügbare `overlapping_speech` sowie
+  False-Interruption-Events auswerten und intern als
+  `call.user_interruption_detected` abbilden
 - Barge-in-Stop-Latenz weiter als CallTool-Metrik messen
 - keine eigene Audio- oder Endpointing-Implementierung bauen
 - Watchdog ausschließlich für Hänger, Stille und Recovery verwenden
+
+**Code-Status:** umgesetzt. `vad` ist die einzige Interruption-Strategie im
+Self-Hosted-Build. LiveKit übernimmt die Erkennung und das Stoppen der Ausgabe;
+CallTool misst die nativen Events und die Barge-in-Latenz.
 
 ### 3. DTMF und IVR
 
@@ -124,16 +143,26 @@ zeigen, dass der LiveKit-Detektor besser geeignet ist.
 - LiveKit-Mechanik mit realen IVR-Testfällen prüfen
 - erlaubte Ziffern, Menüstrategie, Timeout und Audit im CallTool kontrollieren
 
+**Code-Status:** umgesetzt. Senden und Empfangen verwenden LiveKit; Allowlist,
+Aktionslänge, Inter-Digit-Delay, Navigationstimeout und optionales Raw-Digit-
+Audit liegen bei CallTool.
+
 ### 4. AMD und Voicemail
 
 - LiveKit AMD optional und zunächst für Outbound testen
-- Zustände `human`, `machine-ivr`, `machine-vm`, `unavailable` und `uncertain`
+- Zustände `human`, `machine-ivr`, `machine-vm`, `machine-unavailable` und `uncertain`
   in `ActiveCallContext`, Events und Outcome abbilden
-- prüfen, ob für das Self-Hosted-Realtime-Setup ein separater AMD-LLM/STT-
-  Classifier oder LiveKit Inference benötigt wird
+- prüfen, ob der vorhandene Realtime-Transcript plus kleiner provider-nativer
+  Text-Classifier für das Self-Hosted-Realtime-Setup ausreicht
 - Policy für Mailbox definieren: auflegen, Nachricht hinterlassen oder
   menschliche Entscheidung anfordern
 - keine eigene Audio- oder Mailbox-Erkennung bauen
+
+**Code-Status:** umgesetzt. Self-Hosted AMD verwendet LiveKit AMD, den
+vorhandenen Realtime-Input-Transcript und einen kleinen Text-Classifier beim
+gewählten Gemini-/OpenAI-Provider. Ein zweiter STT-Stream oder zusätzlicher
+Inference-Dienst ist dafür nicht erforderlich. Die Policies `hangup`, `continue`,
+`leave_message` und `request_user` sind konfigurierbar.
 
 ### 5. Native LiveKit-Metriken
 
@@ -144,6 +173,10 @@ zeigen, dass der LiveKit-Detektor besser geeignet ist.
   Recovery und Geschäftsresultate behalten
 - keine synchronen Rohmetriken in PostgreSQL schreiben
 
+**Code-Status:** umgesetzt. Native Plugin- und Turn-Metriken werden in
+Prometheus aggregiert; Session Usage und ein kompakter finaler Session Report
+werden im dauerhaften Voice-Session-State abgelegt.
+
 ### 6. Cold Transfer vorbereiten
 
 - Transfer-Tool und Policy-Schnittstelle definieren
@@ -151,6 +184,10 @@ zeigen, dass der LiveKit-Detektor besser geeignet ist.
 - LiveKit SIP Transfer API beziehungsweise SIP REFER verwenden
 - Telnyx-REFER-Freischaltung und Fehlerfälle testen
 - Transfer-Zustand, Ziel, Timeout und Ergebnis dauerhaft speichern
+
+**Code-Status:** umgesetzt und mit simulierter LiveKit-Antwort getestet. Der
+Pfad ist standardmäßig deaktiviert, benötigt `may_transfer=true` und muss noch
+gegen einen Telnyx-Account mit erlaubtem SIP REFER real verifiziert werden.
 
 Cold Transfer ist in v0.1.1 zunächst ein kontrollierter Testpfad. Warm Transfer
 und ein vollständiges Beratungsgespräch bleiben v0.2 beziehungsweise
@@ -163,20 +200,26 @@ Beta-Abhängigkeiten mitbringt.
 - `krisp_enabled` nicht standardmäßig für die Self-Hosted-SIP-Installation
   aktivieren
 - Sprachqualität und Turn Detection zunächst ohne Krisp messen
-- später getrennt prüfen, ob LiveKit Cloud oder ein lizenzierter Plugin-Pfad
-  eingesetzt werden soll
+- keine proprietäre Noise-Processing-Abhängigkeit für die v0.1-Baseline
+
+**Code-Status:** umgesetzt. `krisp_enabled=false` ist Default und wird explizit
+an den LiveKit-SIP-Participant-Request übergeben.
 
 ### v0.1.1-Abnahme
 
-- Outbound und Inbound funktionieren mit Telnyx und deutscher DID.
-- Ein 20-Minuten-Call funktioniert inklusive Transcript und Outcome.
-- Barge-in, False Interruption und Watchdog-Recovery sind messbar.
-- Turn Detection kann per Env/YAML umgeschaltet und verglichen werden.
-- DTMF, IVR und AMD sind opt-in testbar und policy-kontrolliert.
-- native LiveKit-Metriken und CallTool-Metriken sind getrennt sichtbar.
-- Call-Historie enthält Richtung, Zeitstempel, Events, Transcript und Outcome.
-- MCP, REST, Idempotency, Human-in-the-loop und Cancel funktionieren.
-- Docker-, Unit-, Integrations- und Konfigurations-Checks sind grün.
+- [ ] Outbound und Inbound funktionieren im aktuellen Kandidaten real mit Telnyx
+  und deutscher DID.
+- [ ] Ein realer 20-Minuten-Call funktioniert inklusive Transcript und Outcome.
+- [ ] Barge-in, False Interruption und Watchdog-Recovery sind in realen Calls
+  gemessen.
+- [x] Turn Detection kann per Env/YAML umgeschaltet und verglichen werden.
+- [x] DTMF, IVR und AMD sind opt-in testbar und policy-kontrolliert.
+- [x] Native LiveKit-Metriken und CallTool-Metriken sind getrennt sichtbar.
+- [x] Call-Historie enthält Richtung, Zeitstempel, Events, Transcript und Outcome.
+- [x] MCP, REST, Idempotency, Human-in-the-loop und Cancel sind implementiert und
+  automatisiert getestet.
+- [x] Lint, strikte Typprüfung, Unit-/API-/MCP- und Konfigurations-Checks sind
+  lokal grün; PostgreSQL-Integration und Docker-Build bleiben Teil des CI-Gates.
 
 ## v0.2.x — Telefonie- und Analyseausbau
 
@@ -353,12 +396,13 @@ Ein Feature wird erst in eine stabile Version aufgenommen, wenn:
 
 ## Aktueller nächster Meilenstein
 
-Der nächste konkrete Meilenstein ist `v0.1.1-dev.N` mit dieser Reihenfolge:
+Der Feature-Umfang ist für den `v0.1.1-dev.3`-Kandidaten implementiert. Ab
+`v0.1.1-dev.4` gilt folgende Reihenfolge:
 
-1. LiveKit-native Turn Detection per Flag testbar machen.
-2. Interruption-Events und native Metriken ergänzen.
-3. IVR/DTMF und AMD opt-in integrieren.
-4. Watchdog auf Recovery und Hängerüberwachung begrenzen.
-5. Cold-Transfer-Schnittstelle vorbereiten.
-6. Self-Hosted-Noise-Pfad ohne Krisp-Annahme dokumentieren.
-7. Real-Call-Testmatrix ausführen und Definition of Done abschließen.
+1. Real-Call-Testmatrix für Inbound, Outbound, IVR, Mailbox und Transfer
+   ausführen.
+2. 20-Minuten-Soak mit Transcript, Outcome, Session Usage und Report prüfen.
+3. `realtime_llm` gegen `livekit_v1_mini` mit `vad` messen und für Deutsch die
+   Turn-Thresholds gemeinsam mit den Qualitätsmetriken kalibrieren.
+4. Alle gefundenen Fehler ohne neue v0.1.1-Features beheben.
+5. Definition of Done abschließen und anschließend `v0.1.1` bewusst releasen.

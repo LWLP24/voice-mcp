@@ -253,6 +253,75 @@ The exact model names and integration options are documented by
 [OpenAI GPT-Realtime-2.1 Mini](https://developers.openai.com/api/docs/models/gpt-realtime-2.1-mini),
 and the [LiveKit OpenAI Realtime plugin](https://docs.livekit.io/agents/models/realtime/plugins/openai/).
 
+### v0.1.1 voice and telephony test switches
+
+The LiveKit-first v0.1.1 features are independently configurable. The checked-in
+self-hosted defaults use provider-native turn detection, VAD interruption handling, no
+Krisp, and keep IVR, AMD, and Cold Transfer disabled:
+
+```dotenv
+CALLTOOL_TURN_DETECTION_MODE=realtime_llm
+CALLTOOL_INTERRUPTION_MODE=vad
+CALLTOOL_IVR_ENABLED=false
+CALLTOOL_AMD_ENABLED=false
+CALLTOOL_COLD_TRANSFER_ENABLED=false
+CALLTOOL_KRISP_ENABLED=false
+```
+
+Empty values use `config/calltool.yaml`. Valid turn modes are `realtime_llm` and
+`livekit_v1_mini`; the only interruption mode in this fully self-hosted build is `vad`.
+The local `v1-mini` path disables the realtime provider's server-side endpointing for
+that session, uses the local LiveKit VAD, and loads the approximately 108 MB local
+turn-detector model in the worker process. No external LiveKit service or inference
+gateway is used. Only one turn strategy is active per call.
+
+For `livekit_v1_mini`, `CALLTOOL_TURN_UNLIKELY_THRESHOLD` and
+`CALLTOOL_TURN_BACKCHANNEL_THRESHOLD` optionally override the detector thresholds for
+the selected language. Keep them empty until German evaluation calls establish suitable
+values; this makes the threshold decision measurable instead of silently treating the
+English defaults as calibrated German values.
+
+Enabling IVR exposes CallTool's audited `send_dtmf` tool on outbound calls and enables
+LiveKit IVR loop/silence handling. `telephony.ivr` controls allowed digits, maximum
+digits per action, inter-digit delay, the complete navigation timeout, and whether raw
+digits may be written to audit events. Raw digits are hidden by default.
+
+AMD is outbound-only and runs once immediately after answer. It uses LiveKit AMD with a
+small provider-native text classifier (`gemini-2.5-flash-lite` or `gpt-4.1-mini`) and the
+realtime session's input transcript, so the fully self-hosted path does not require a
+second STT or an additional inference service. Keep `voice.realtime.input_transcription: true`.
+The `telephony.amd` policy can hang up, continue, leave the file-prompted voicemail from
+`voicemail-instruction.md`, or request a human decision through the existing MCP/REST
+`respond` flow. AMD category, transcript, timings, action outcome, and errors are stored
+in the call state and events.
+
+Cold Transfer uses LiveKit's SIP transfer API/SIP REFER and is exposed only when both the
+global switch is enabled and the outbound request grants `may_transfer`. Telnyx must
+allow SIP REFER for the connection. A transfer-capable request includes:
+
+```json
+{
+  "target": {"phone_number": "+49301234567", "name": "Praxis"},
+  "objective": "Rufe die Praxis an und übergib bei Bedarf an mich.",
+  "permissions": {
+    "may_commit": false,
+    "may_accept_costs": false,
+    "may_transfer": true,
+    "may_disclose": []
+  }
+}
+```
+
+The transfer target passes the same country, emergency-number, and premium-number policy
+as a normal outbound call. Transfer ID, target, timeout result, LiveKit reason, and SIP
+status remain available in PostgreSQL through call status/conversation responses.
+
+LiveKit plugin metrics are aggregated in Prometheus without synchronously writing raw
+samples to PostgreSQL. Per-turn EOT/transcription/response delays, native interruption
+events, false interruptions, usage, and a compact final session report are also captured.
+CallTool's `/metrics` endpoint exposes these alongside lifecycle, tool, policy, watchdog,
+and barge-in metrics.
+
 ### File-based prompt profiles
 
 System prompts and default greetings are not embedded in Python. The checked-in profile
@@ -265,6 +334,8 @@ is located at `config/prompts/default` and contains:
 | `greeting-outbound.txt` | Default outbound greeting source text |
 | `greeting-inbound.txt` | Default inbound greeting source text |
 | `greeting-instruction.md` | Instruction used when the native realtime model localizes the greeting |
+| `voicemail-instruction.md` | Policy-safe message used when AMD selects `leave_message` |
+| `ivr-instruction.md` | Navigation strategy used after AMD recognizes an IVR |
 | `watchdog-instruction.md` | Model instruction used to recover from an unexpected silent turn |
 | `watchdog-fallback.txt` | Final scripted recovery phrase if model recovery fails |
 | `supervisor.md` | Prompt for the optional post-call outcome supervisor |
@@ -294,7 +365,7 @@ template code. Available placeholders are:
   `target_phone_number`, `caller_name`, `caller_phone_number`,
   `called_phone_number`, and `organization_name`.
 - Runtime data: `language`, `context_json`, `constraints_json`, `permissions_json`,
-  `may_commit`, `may_accept_costs`, and `may_disclose_json`.
+  `may_commit`, `may_accept_costs`, `may_transfer`, and `may_disclose_json`.
 - Greeting instruction only: `greeting_json`, containing the rendered greeting as a
   JSON string.
 - Supervisor only: `outcome_json`, containing the structured call result.

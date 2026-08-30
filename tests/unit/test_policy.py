@@ -45,9 +45,7 @@ def test_enforces_earliest_time_and_excluded_weekday() -> None:
         state, "book_appointment", {"datetime": "2026-09-03T14:30:00+02:00"}
     )
     tuesday = datetime(2026, 9, 1, 16, 30).astimezone().isoformat()
-    excluded = policy.authorize_commit(
-        state, "book_appointment", {"datetime": tuesday}
-    )
+    excluded = policy.authorize_commit(state, "book_appointment", {"datetime": tuesday})
     allowed = policy.authorize_commit(
         state, "book_appointment", {"datetime": "2026-09-03T16:30:00+02:00"}
     )

@@ -53,6 +53,9 @@ In the Telnyx Mission Control Portal:
 7. Add the public LiveKit SIP hostname and port `5060` to the FQDN connection.
 8. Set the inbound destination number format to `+E.164`.
 9. Assign the German phone number to that connection.
+10. Before testing Cold Transfer, ask Telnyx support or verify in the connection settings
+    that outbound SIP REFER is permitted. Keep the CallTool feature disabled until this is
+    confirmed.
 
 CallTool sends destinations and caller IDs in `+E.164`. Keep the Telnyx destination and
 origination number formats on `+E.164`. The configured caller number must belong to the
@@ -131,6 +134,34 @@ CALLTOOL_PROMPT_DIR=/app/config/prompts/my-company
 Compose mounts `./config` read-only into both CallTool containers. Prompt changes are
 loaded for the next call without rebuilding the image. Run `calltool doctor` after every
 change; it rejects missing files and invalid placeholders before a test call is placed.
+
+The v0.1.1 LiveKit-first test paths are opt-in:
+
+```dotenv
+CALLTOOL_TURN_DETECTION_MODE=realtime_llm
+CALLTOOL_INTERRUPTION_MODE=vad
+CALLTOOL_IVR_ENABLED=false
+CALLTOOL_AMD_ENABLED=false
+CALLTOOL_COLD_TRANSFER_ENABLED=false
+CALLTOOL_KRISP_ENABLED=false
+```
+
+`livekit_v1_mini` runs locally and adds a local LiveKit VAD. The fully self-hosted build
+supports `vad` interruption handling only; it does not use an external LiveKit service or
+an inference gateway. AMD reuses the realtime input transcript and the selected provider's small text
+model, so it needs input transcription and the corresponding Google/OpenAI key, but no
+second STT service. IVR, AMD, transfer policies, timeouts, and classifier models are
+configured under `telephony` in `config/calltool.yaml`.
+
+When testing `livekit_v1_mini` in German, set and compare
+`CALLTOOL_TURN_UNLIKELY_THRESHOLD` and `CALLTOOL_TURN_BACKCHANNEL_THRESHOLD` only after
+running evaluation calls. The values are recorded in the call's voice-session state so
+false end-of-turns, late responses, false interruptions, CPU use, and the chosen
+thresholds can be compared together.
+
+Cold Transfer is only offered for outbound calls whose API/MCP request includes
+`permissions.may_transfer=true`. Enable it only after Telnyx REFER support has been
+confirmed. Krisp stays disabled for the self-hosted SIP path.
 
 ## 4. Start and bootstrap
 

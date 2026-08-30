@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.metadata
 from dataclasses import dataclass
 
@@ -51,17 +52,21 @@ async def run(call_number: str | None = None) -> int:
     finally:
         await redis_client.aclose()
 
+    livekit: api.LiveKitAPI | None = None
     try:
         livekit = api.LiveKitAPI(
             url=settings.LIVEKIT_URL,
             api_key=settings.LIVEKIT_API_KEY,
             api_secret=settings.LIVEKIT_API_SECRET.get_secret_value(),
         )
-        await livekit.room.list_rooms(api.ListRoomsRequest())
+        async with asyncio.timeout(5):
+            await livekit.room.list_rooms(api.ListRoomsRequest())
         checks.append(Check("LiveKit", True, settings.LIVEKIT_URL))
-        await livekit.aclose()
     except Exception as exc:
         checks.append(Check("LiveKit", False, str(exc)))
+    finally:
+        if livekit is not None:
+            await livekit.aclose()
 
     checks.append(
         Check(
@@ -106,45 +111,46 @@ async def run(call_number: str | None = None) -> int:
                 api_key=settings.LIVEKIT_API_KEY,
                 api_secret=settings.LIVEKIT_API_SECRET.get_secret_value(),
             )
-            trunks = await inbound_client.sip.list_sip_inbound_trunk(
-                api.ListSIPInboundTrunkRequest(numbers=[settings.TELNYX_FROM_NUMBER])
-            )
-            trunk = next(
-                (
-                    item
-                    for item in trunks.items
-                    if item.name == "CallTool Telnyx Inbound"
-                    and settings.TELNYX_FROM_NUMBER in item.numbers
-                ),
-                None,
-            )
-            if trunk is None:
-                checks.append(
-                    Check(
-                        "LiveKit inbound routing",
-                        False,
-                        "inbound trunk missing; run calltool sip bootstrap",
-                    )
+            async with asyncio.timeout(5):
+                trunks = await inbound_client.sip.list_sip_inbound_trunk(
+                    api.ListSIPInboundTrunkRequest(numbers=[settings.TELNYX_FROM_NUMBER])
                 )
-            else:
-                rules = await inbound_client.sip.list_sip_dispatch_rule(
-                    api.ListSIPDispatchRuleRequest(trunk_ids=[trunk.sip_trunk_id])
-                )
-                dispatch = next(
-                    (item for item in rules.items if item.name == "CallTool Telnyx Inbound"),
+                trunk = next(
+                    (
+                        item
+                        for item in trunks.items
+                        if item.name == "CallTool Telnyx Inbound"
+                        and settings.TELNYX_FROM_NUMBER in item.numbers
+                    ),
                     None,
                 )
-                checks.append(
-                    Check(
-                        "LiveKit inbound routing",
-                        dispatch is not None,
-                        (
-                            f"trunk {trunk.sip_trunk_id}, dispatch {dispatch.sip_dispatch_rule_id}"
-                            if dispatch is not None
-                            else f"trunk {trunk.sip_trunk_id}, dispatch rule missing"
-                        ),
+                if trunk is None:
+                    checks.append(
+                        Check(
+                            "LiveKit inbound routing",
+                            False,
+                            "inbound trunk missing; run calltool sip bootstrap",
+                        )
                     )
-                )
+                else:
+                    rules = await inbound_client.sip.list_sip_dispatch_rule(
+                        api.ListSIPDispatchRuleRequest(trunk_ids=[trunk.sip_trunk_id])
+                    )
+                    dispatch = next(
+                        (item for item in rules.items if item.name == "CallTool Telnyx Inbound"),
+                        None,
+                    )
+                    checks.append(
+                        Check(
+                            "LiveKit inbound routing",
+                            dispatch is not None,
+                            (
+                                f"trunk {trunk.sip_trunk_id}, dispatch {dispatch.sip_dispatch_rule_id}"
+                                if dispatch is not None
+                                else f"trunk {trunk.sip_trunk_id}, dispatch rule missing"
+                            ),
+                        )
+                    )
         except Exception as exc:
             checks.append(Check("LiveKit inbound routing", False, str(exc)))
         finally:

@@ -4,12 +4,14 @@ import asyncio
 import hashlib
 import json
 import time
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from typing import Any
 
 from livekit import rtc
 from livekit.agents import llm
 
+from calltool.calls.errors import PolicyDeniedError
 from calltool.calls.ids import new_id
 from calltool.calls.models import (
     ActiveCallState,
@@ -17,13 +19,27 @@ from calltool.calls.models import (
     CallOutcome,
     CallStatus,
     Candidate,
+    ColdTransferState,
     Commitment,
+    TransferStatus,
     utc_now,
 )
 from calltool.calls.service import CallService
+from calltool.config import IVRConfig
 from calltool.observability.metrics import TOOL_LATENCY
 from calltool.policy.engine import PolicyEngine
 from calltool.realtime.active_calls import ActiveCallContext
+
+
+@dataclass(frozen=True)
+class TransferResult:
+    status: TransferStatus
+    transfer_id: str | None = None
+    reason: str | None = None
+    sip_status: str | None = None
+
+
+TransferHandler = Callable[[str], Awaitable[TransferResult]]
 
 
 @dataclass
@@ -34,6 +50,10 @@ class ToolRuntime:
     policy: PolicyEngine
     room: rtc.Room
     finish_event: asyncio.Event
+    ivr_config: IVRConfig = field(default_factory=IVRConfig)
+    ivr_enabled: bool = False
+    cold_transfer_enabled: bool = False
+    transfer_handler: TransferHandler | None = None
 
     async def current_state(self) -> ActiveCallState:
         return self.context.snapshot()
@@ -163,10 +183,15 @@ def build_tools(
     async def send_dtmf(digits: str) -> dict[str, Any]:
         started = time.perf_counter()
         try:
-            valid = "0123456789*#ABCD"
-            if not digits or any(digit not in valid for digit in digits):
+            normalized = digits.upper()
+            config = runtime.ivr_config
+            if (
+                not normalized
+                or len(normalized) > config.max_digits_per_action
+                or any(digit not in config.allowed_digits for digit in normalized)
+            ):
                 return {"sent": False, "reason": "invalid_dtmf"}
-            for digit in digits:
+            for digit in normalized:
                 if digit.isdigit():
                     code = int(digit)
                 elif digit == "*":
@@ -176,10 +201,88 @@ def build_tools(
                 else:
                     code = ord(digit) - ord("A") + 12
                 await runtime.room.local_participant.publish_dtmf(code=code, digit=digit)
-                await asyncio.sleep(0.3)
-            return {"sent": True, "digits": digits}
+                if config.inter_digit_delay_seconds:
+                    await asyncio.sleep(config.inter_digit_delay_seconds)
+            payload: dict[str, object] = {"digit_count": len(normalized)}
+            if config.audit_digits:
+                payload["digits"] = normalized
+            runtime.context.persist_event("call.dtmf_sent", payload)
+            return {"sent": True, "digit_count": len(normalized)}
         finally:
             TOOL_LATENCY.labels(tool="send_dtmf").observe(time.perf_counter() - started)
+
+    @llm.function_tool(
+        description=(
+            "Übergibt den aktuellen Anruf per Cold Transfer an eine erlaubte Telefonnummer."
+        )
+    )
+    async def cold_transfer(target_number: str) -> dict[str, Any]:
+        started = time.perf_counter()
+        try:
+            if not runtime.cold_transfer_enabled or runtime.transfer_handler is None:
+                return {"transferred": False, "reason": "cold_transfer_disabled"}
+            if not runtime.context.permissions.may_transfer:
+                return {"transferred": False, "reason": "transfer_permission_missing"}
+            try:
+                normalized = runtime.policy.validate_target(target_number)
+            except PolicyDeniedError as exc:
+                return {"transferred": False, "reason": exc.reason}
+
+            transfer = ColdTransferState(
+                target_number=normalized,
+                status=TransferStatus.REQUESTED,
+            )
+            async with runtime.context.state_transaction():
+                runtime.context.record_transfer(transfer)
+                await runtime.context.persist_state_durable(
+                    "call.transfer_requested",
+                    {"target_number": normalized},
+                    expected_statuses={CallStatus.ACTIVE, CallStatus.INPUT_REQUIRED},
+                )
+
+            try:
+                result = await runtime.transfer_handler(normalized)
+            except Exception as exc:
+                result = TransferResult(
+                    status=TransferStatus.FAILED,
+                    reason=f"transfer_api_error:{type(exc).__name__}",
+                )
+            transfer.status = result.status
+            transfer.transfer_id = result.transfer_id
+            transfer.reason = result.reason
+            transfer.sip_status = result.sip_status
+            transfer.updated_at = utc_now()
+            async with runtime.context.state_transaction():
+                runtime.context.record_transfer(transfer)
+                event_type = {
+                    TransferStatus.SUCCESSFUL: "call.transfer_succeeded",
+                    TransferStatus.ONGOING: "call.transfer_ongoing",
+                    TransferStatus.FAILED: "call.transfer_failed",
+                    TransferStatus.REQUESTED: "call.transfer_requested",
+                }[result.status]
+                await runtime.context.persist_state_durable(
+                    event_type,
+                    transfer.model_dump(mode="json"),
+                    expected_statuses={CallStatus.ACTIVE, CallStatus.INPUT_REQUIRED},
+                )
+            if result.status is TransferStatus.SUCCESSFUL:
+                state = runtime.context.snapshot()
+                await runtime.context.persist_completion(
+                    CallOutcome(
+                        success=True,
+                        reason="cold_transfer_successful",
+                        summary=f"Gespräch wurde an {normalized} übergeben.",
+                        facts=state.facts,
+                        commitments=state.commitments,
+                    )
+                )
+                runtime.finish_event.set()
+            return {
+                "transferred": result.status is TransferStatus.SUCCESSFUL,
+                **transfer.model_dump(mode="json"),
+            }
+        finally:
+            TOOL_LATENCY.labels(tool="cold_transfer").observe(time.perf_counter() - started)
 
     @llm.function_tool(description="Markiert das Gespräch als abgeschlossen und baut das Ergebnis.")
     async def finish_call(
@@ -209,11 +312,15 @@ def build_tools(
     if direction is CallDirection.INBOUND:
         return [record_fact, finish_call]
 
-    return [
+    outbound_tools: list[llm.Tool | llm.Toolset] = [
         record_fact,
         propose_candidate,
         authorize_commit,
         request_user_input,
-        send_dtmf,
-        finish_call,
     ]
+    if runtime.ivr_enabled:
+        outbound_tools.append(send_dtmf)
+    if runtime.cold_transfer_enabled:
+        outbound_tools.append(cold_transfer)
+    outbound_tools.append(finish_call)
+    return outbound_tools

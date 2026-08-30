@@ -23,6 +23,8 @@ def _write_profile(directory: Path) -> None:
         "greeting-inbound.txt": "Hallo bei {{ organization_name }}.",
         "greeting-outbound.txt": "Hallo wegen {{ objective }}.",
         "greeting-instruction.md": "Sprich {{ greeting_json }} auf {{ language }}.",
+        "voicemail-instruction.md": "Mailbox für {{ objective }} auf {{ language }}.",
+        "ivr-instruction.md": "IVR für {{ objective }} auf {{ language }}.",
         "watchdog-instruction.md": "Antworte jetzt auf {{ language }}.",
         "watchdog-fallback.txt": "Die Verbindung hakt.",
         "supervisor.md": "Fasse {{ outcome_json }} auf {{ language }} zusammen.",
