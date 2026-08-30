@@ -41,6 +41,7 @@ Hermes / Claude / OpenAI / eigener Agent / n8n
 │             CallTool Worker            │
 │                                        │
 │ LiveKit AgentSession                   │
+│ LiveKit Voice-Primitive Adapters       │
 │ Call State                             │
 │ Policy Engine                          │
 │ Tools                                  │
@@ -85,12 +86,22 @@ AUDIO → STT → LLM → TTS → AUDIO
 
 Das spart den größten Teil der vermeidbaren Voice-Latenz.
 
+LiveKit übernimmt dabei nach Möglichkeit die nativen Echtzeitprimitive:
+
+```text
+LiveKit AgentSession
+├── native oder konfigurierbare Turn Detection
+├── Interruption / Barge-in
+├── SIP, DTMF und optional IVR/AMD
+└── Session-, Turn- und Modell-Metriken
+```
+
 Parallel beziehungsweise optional:
 
 ```text
 Gemini 3.5 Transcribe Live
           ↓
-Realtime Transcript
+optionaler Shadow Transcript / Analytics
           ↓
 State / Observability / Supervisor
 Gemini 3.7 Flash
@@ -393,6 +404,7 @@ Alles, was in einem normalen Gespräch ständig passiert:
 
 ```text
 User Speech
+→ LiveKit Turn Detection / Interruption
 → Gemini 3.1 Live
 → lokale Tools
 → Gemini 3.1 Live
@@ -408,6 +420,9 @@ lokale State Machine
 ```
 
 dürfen hier synchron blockieren.
+
+LiveKit übernimmt dabei die Echtzeit- und Medienprimitive. CallTool greift in
+den Hot-Path nur für schnelle, lokale Tool- und Policy-Entscheidungen ein.
 
 ### 8.2 Control / Slow Path
 
@@ -437,8 +452,8 @@ dürfen separat laufen.
         ┌──────────────┴──────────────┐
         │                             │
         ▼                             ▼
- Gemini 3.1 Flash Live        optional Shadow STT
-       FAST PATH              Gemini 3.5 Transcribe
+ LiveKit Voice Primitives     optional Shadow STT
+ Turn / Interrupt / SIP       Gemini 3.5 Transcribe
         │                             │
         │                             ▼
         │                       Transcript Events
@@ -451,8 +466,17 @@ dürfen separat laufen.
         │  Local State
         │  Policy Engine
         │
+        ├── Gemini 3.1 Flash Live /
+        │   OpenAI Realtime
+        │      FAST PATH
+        │
         └──────────────→ Speech Output
 ```
+
+LiveKit übernimmt im normalen Pfad Audio, Turn Detection, Interruption und
+SIP-nahe Primitive. DTMF, IVR, AMD und Transfer werden als optionale Adapter
+aktiviert. CallTool behält Tool-Policy, Berechtigungen, Call State, Persistenz
+und Audit.
 
 Parallel:
 
@@ -1014,9 +1038,13 @@ frühe Interim Transcripts
 Live Dashboard
 Custom Vocabulary
 Background Supervisor
-semantischer LiveKit Turn Detector
 bessere Call Analytics
+unabhängige Transcript-Qualitätssicherung
 ```
+
+Shadow STT ist kein notwendiger Bestandteil für Turn Detection, Barge-in oder
+Endpointing. Diese Funktionen werden zuerst über die Realtime- beziehungsweise
+LiveKit-Primitives getestet.
 
 ## 30. Gemini 3.5 Transcribe Live Limit
 
@@ -1081,59 +1109,33 @@ direkte Google Live Transcribe Verbindung
 
 ## 32. Turn Detection
 
-Für den Native-Audio-Hot-Path:
+Turn Detection bleibt eine konfigurierbare Architekturentscheidung. Der
+Realtime-native Modus ist der Default, weil er keinen zusätzlichen Detector und
+keine zusätzliche Audio-/STT-Synchronisation benötigt.
 
-Default
+Zusätzlich wird LiveKit Audio Turn Detector v1-mini als eigener Testpfad
+unterstützt:
 
 ```text
-Gemini native activity / turn detection
+voice.turn_detection.mode = realtime_llm
+voice.turn_detection.mode = livekit_v1_mini
 ```
 
-LiveKit empfiehlt bei Realtime-Modellen grundsätzlich zuerst die im Modell eingebaute Turn Detection.
+`livekit_v1_mini` läuft lokal und muss hinsichtlich CPU, Antwortlatenz,
+Backchannels und Unterbrechungen gegen `realtime_llm` gemessen werden. Pro
+Session ist genau ein Turn-Detection-Modus aktiv.
 
-**Quelle:**
+**Quellen:**
 
 - <https://docs.livekit.io/agents/models/realtime/>
-
-Das vermeidet:
-
-```text
-extra STT dependency
-extra detector
-extra synchronization
-```
-
-## 33. Alternative Turn Detection
-
-Wenn echte Call-Tests zeigen:
-
-```text
-Gemini antwortet zu früh
-Gemini wartet zu lange
-Backchannels triggern zu oft
-```
-
-dann A/B-Test:
-
-A
-
-```text
-Gemini Native Turn Detection
-```
-
-B
-
-```text
-Gemini automatic activity detection OFF
-Gemini 3.5 Transcribe Live
-LiveKit Audio TurnDetector
-```
-
-LiveKit Audio Turn Detector ist seit Agents 1.6.1 im SDK.
-
-**Quelle:**
-
 - <https://docs.livekit.io/agents/logic/turns/turn-detector/>
+
+## 33. Keine Shadow-STT-Abhängigkeit für Turn Detection
+
+Der frühere Shadow-STT-Pfad wird nicht mehr als notwendiger Teil des LiveKit-
+Turn-Detector-Experiments eingeplant. Falls `v1-mini` nicht ausreicht, werden
+die Ursachen zunächst über Audio-, Turn- und Session-Metriken untersucht. Shadow
+STT bleibt ein optionaler Analyse- und Transcript-Pfad.
 
 ## 34. Keine theoretische Entscheidung über Turn Detection
 
@@ -1155,6 +1157,7 @@ false_end_of_turn
 late_response
 false_interruption
 barge_in_stop_latency
+CPU pro Call
 ```
 
 ## 35. Barge-in ist Pflicht
@@ -1180,6 +1183,19 @@ p95 < 250 ms
 ```
 
 Engineering-Ziel, keine Provider-Garantie.
+
+Die Erkennung und das Stoppen der Ausgabe übernimmt primär LiveKit
+`AgentSession`. CallTool beobachtet die nativen Interruption-Events und misst
+die Latenz. Der Watchdog bleibt davon getrennt: Er behandelt einen stillen oder
+festhängenden Agenten, nicht das normale Endpointing oder Barge-in.
+
+Zu testen sind insbesondere adaptive Interruption und der einfachere VAD-Modus.
+Eigene Audio-Unterbrechungslogik wird nicht parallel zu LiveKit gebaut.
+
+**Quelle:**
+
+- <https://docs.livekit.io/agents/logic/turns/>
+- <https://docs.livekit.io/agents/logic/turns/tuning/>
 
 ## 36. Antwortlatenz-Ziel
 
@@ -2220,8 +2236,19 @@ Outbound Call
 Inbound Trunk
 Inbound Dispatch Rule
 DTMF
+IVR-/AMD-Bausteine, falls aktiviert
+Cold Transfer über SIP REFER, falls aktiviert
 Hangup
 ```
+
+SIP-Metadaten werden ausschließlich über LiveKit Participant Attributes und
+Header-Mapping übernommen. CallTool parst keine SIP-Pakete selbst. Die
+zuverlässige Zuordnung von Caller-ID, Zielnummer, Trunk und SIP Call-ID wird im
+Call-Kontext normalisiert und validiert.
+
+Krisp beziehungsweise Noise Processing ist für den vollständig Self-Hosted-
+SIP-Pfad keine v0.1-Voraussetzung. Ein späterer Cloud- oder lizenzierter
+Plugin-Pfad wird separat evaluiert.
 
 **Quelle:**
 
@@ -2324,15 +2351,34 @@ Nicht LLM frei auf Tastatur hämmern lassen.
 
 DTMF Actions dürfen Policy haben.
 
+Der Transport bleibt LiveKit-native: CallTool entscheidet nur, ob eine
+Ziffernfolge für den aktuellen Auftrag zulässig ist, und delegiert Senden und
+Empfang an LiveKit. `ivr_detection` wird optional aktiviert und mit echten
+Menüs getestet. Timeouts, erlaubte Ziffern, Wiederholungen und Audit-Events
+bleiben CallTool-Verantwortung.
+
+**Quelle:**
+
+- <https://docs.livekit.io/telephony/features/dtmf/>
+
 ## 82. Voicemail
 
 Ein SIP 200 OK kann auch Mailbox sein.
 
-Später:
+Für die Erkennung wird kein eigener AMD-Stack gebaut. LiveKit AMD wird zunächst
+optional für Outbound getestet und liefert unter anderem:
 
 ```text
-AMD / voicemail detection
+human
+machine-ivr
+machine-vm
+machine-unavailable
+uncertain
 ```
+
+Die Erkennung läuft einmalig am Anfang des Calls und ist daher kein dauerhaftes
+Monitoring. Im Self-Hosted-Realtime-Setup muss geprüft werden, ob AMD einen
+separaten LLM-/STT-Classifier oder LiveKit Inference benötigt.
 
 Default:
 
@@ -2341,6 +2387,14 @@ hangup
 ```
 
 oder konfigurierbar.
+
+Das Ergebnis wird in `ActiveCallContext`, Call Events, Outcome und PostgreSQL
+gespeichert. Die Entscheidung, ob aufgelegt, eine Nachricht hinterlassen oder
+ein Mensch gefragt wird, bleibt Policy-Logik von CallTool.
+
+**Quelle:**
+
+- <https://docs.livekit.io/telephony/features/answering-machine-detection/>
 
 ## 83. Retry
 
@@ -2470,8 +2524,18 @@ call.user_speech_started
 call.user_speech_ended
 call.agent_speech_started
 call.agent_speech_ended
+call.user_interruption_detected
+call.false_interruption_detected
+call.turn_completed
 call.tool_started
 call.tool_finished
+call.dtmf_sent
+call.dtmf_received
+call.ivr_detected
+call.amd_detected
+call.transfer_requested
+call.transfer_connected
+call.transfer_failed
 call.fact_recorded
 call.candidate_detected
 call.commit_requested
@@ -2592,6 +2656,11 @@ user_talk_ratio
 overlap_duration
 ```
 
+Turn-, Modell- und Plugin-Metriken werden bevorzugt über die nativen LiveKit-
+Hooks eingesammelt. CallTool ergänzt nur Werte, die LiveKit nicht kennt, zum
+Beispiel Policy-Ergebnisse, Tool-Latenzen, Persistenz-Backlog und
+Geschäftsresultate.
+
 ## 94. Tool-Metriken
 
 ```text
@@ -2613,9 +2682,32 @@ gemini_empty_responses
 
 Letzteres ist wichtig, weil Realtime-Provider naturgemäß gelegentliche Edge Cases haben können.
 
+Zusätzlich werden, soweit der verwendete LiveKit-Adapter sie liefert:
+
+```text
+per-plugin metrics
+per-turn metrics
+session usage
+final session report
+```
+
+beim Call-Ende als aggregierte Observability-Daten übernommen. Rohmetriken
+blockieren weder den Voice-Hot-Path noch werden sie einzeln synchron in
+PostgreSQL geschrieben.
+
+**Quelle:**
+
+- <https://docs.livekit.io/agents/ops/logging/>
+- <https://docs.livekit.io/deploy/observability/data/>
+
 ## 96. Watchdog gegen “Agent ist still”
 
 Ein kritischer Produktionsmechanismus.
+
+Der Watchdog ergänzt LiveKit und ersetzt keine native Turn Detection oder
+Interruption. Seine Aufgabe ist ausschließlich, festhängende, unerwartet
+stumme oder nicht mehr fortschreitende Sessions zu erkennen und die Recovery
+Ladder auszulösen.
 
 Wenn:
 
@@ -3409,6 +3501,11 @@ Er ist:
 Tool / Background Service
 ```
 
+Ein Cold Transfer wird in v0.1 lediglich als vorbereiteter, explizit
+deaktivierter Testpfad betrachtet. Ein Warm Transfer mit Beratungsgespräch
+und mehreren LiveKit-Teilnehmern gehört wegen zusätzlicher Workflow- und
+Beta-Komplexität frühestens in v0.2.
+
 ## 135. Keine mid-session Prompt Mutation
 
 Wenn User Permission nachträglich ändert:
@@ -3895,7 +3992,33 @@ features:
   scripted_confirmations: true
   cascade_fallback: false
   semantic_turn_detector: false
+  livekit_turn_detector_v1_mini: false
+  ivr_detection: false
+  amd: false
+  cold_transfer: false
+  krisp: false
+voice:
+  turn_detection:
+    mode: realtime_llm
+  interruption:
+    mode: adaptive
+telephony:
+  amd:
+    enabled: false
+  ivr:
+    enabled: false
+  transfer:
+    cold_enabled: false
+  noise:
+    krisp_enabled: false
 ```
+
+Die genaue Konfigurationsstruktur muss beim Implementieren an die bestehende
+YAML-/Env-Konfiguration angepasst werden. Entscheidend ist die Trennung:
+LiveKit-Funktionen werden opt-in testbar, während CallTool weiterhin Policy,
+State, Persistenz und Audit kontrolliert. `semantic_turn_detector` bleibt als
+kompatibler Alias erhalten, darf aber nicht zusätzlich zum gewählten
+`turn_detection.mode` aktiv sein.
 
 ## 159. Kosten vs Performance
 
@@ -3988,26 +4111,41 @@ Gemini 3.7 outcome
 MCP
 REST
 Human-in-loop
+LiveKit-native Turn Detection als A/B-Test
+LiveKit-native Interruption / Barge-in
+optionales IVR / DTMF über LiveKit
+optionales AMD für Outbound
+native LiveKit-Metriken
+Cold-Transfer-Schnittstelle vorbereitet, standardmäßig deaktiviert
+Self-Hosted ohne Krisp-Abhängigkeit
 ```
 
 Noch nicht:
 
 ```text
-Shadow STT
+Shadow STT für Turn Detection
+produktiver Shadow STT für Analytics
 Cascade Fallback
-voicemail message
+produktive Voicemail-Nachricht
+Warm Transfer
 multi-agent
 large scale
+Krisp als Self-Hosted-Voraussetzung
 ```
 
 ## 165. v0.2
 
 ```text
-Gemini 3.5 Shadow STT
+Gemini 3.5 Shadow STT für Analytics und Captions
+Shadow-STT-Session-Rollover
 Supervisor Cache
 better live analytics
-DTMF robust
-voicemail detection
+robuste IVR-/DTMF-Navigation
+produktive AMD-/Voicemail-Policy
+Cold Transfer produktionsreif
+Warm Transfer experimentell
+Retry-Scheduler
+Transfer-Timeouts und Rückkehrpfad
 ```
 
 ## 166. v1
@@ -4019,6 +4157,9 @@ distributed concurrency
 advanced retry scheduler
 multiple SIP providers
 provider failover
+Production SLOs und Error Budgets
+Security-/Secret-Rotation
+Regression- und Lasttest-Automatisierung
 ```
 
 ## 167. Definition of Done v0.1
@@ -4045,6 +4186,19 @@ provider failover
 - Commitments laufen durch Policy Engine.
 - State liegt im Worker RAM.
 - State wird durable persistiert.
+- Turn Detection ist über Realtime-native und LiveKit v1-mini per Konfiguration
+  testbar.
+- LiveKit-native Interruption-Events werden beobachtet.
+- DTMF bleibt als policy-kontrolliertes Tool verfügbar und nutzt LiveKit als
+  Transport.
+- IVR-Erkennung und AMD sind optional testbar und standardmäßig deaktiviert.
+- AMD-Ergebnisse werden bei Aktivierung im Call State und Outcome gespeichert.
+- Native LiveKit-Turn-, Plugin- und Session-Metriken werden aggregiert erfasst.
+- Eigene CallTool-Metriken bleiben auf Lifecycle, Policy, Tools, Persistenz und
+  Geschäftsresultate begrenzt.
+- Cold Transfer ist als validierte, standardmäßig deaktivierte Schnittstelle
+  vorbereitet.
+- Krisp ist keine Voraussetzung für die Self-Hosted-Installation.
 - MCP create/status/list/conversation/respond/cancel funktioniert.
 - REST create/status/list/conversation/respond/cancel funktioniert.
 - Idempotency verhindert Doppelanruf.
@@ -4142,9 +4296,30 @@ benchmark
 tune
 ```
 
-Phase 10 — Shadow STT / Supervisor
+Phase 10 — LiveKit-native Voice-Primitives
 
-erst danach.
+```text
+Turn Detector v1-mini per Flag
+native Interruption / Barge-in Events
+IVR / DTMF Adapter
+AMD Adapter
+native Session- und Modell-Metriken
+Watchdog auf Recovery begrenzen
+```
+
+Phase 11 — Cold Transfer Vorbereitung
+
+```text
+Transfer Policy
+Zielvalidierung
+LiveKit SIP Transfer / SIP REFER
+Telnyx-Refer-Test
+Transfer State und Outcome
+```
+
+Phase 12 — Shadow STT / Supervisor
+
+erst danach und nur für Analytics, Captions oder komplexe Hintergrundanalyse.
 
 ## 169. Warum diese Reihenfolge?
 
@@ -4238,11 +4413,18 @@ strukturiertes Gesprächsergebnis
 │         ├── input transcription               │
 │         └── output transcription              │
 │                                               │
+│  LiveKit-native Voice-Primitives               │
+│         ├── Turn Detection                     │
+│         ├── Interruption / Barge-in             │
+│         ├── DTMF / optional IVR / AMD            │
+│         ├── SIP Transfer                        │
+│         └── Turn / Session / Model Metrics       │
+│                                               │
 │  Gemini 3.1 Flash TTS ← scripted speech       │
 │                                               │
 │  Gemini 3.7 Flash ← supervisor/outcome        │
 │                                               │
-│  Gemini 3.5 Transcribe ← optional shadow STT  │
+│  Gemini 3.5 Transcribe ← optional analytics   │
 └──────────────────────┬────────────────────────┘
                        │
                     LiveKit
@@ -4516,11 +4698,13 @@ SUPERVISOR
 Gemini 3.7 Flash
 TRANSCRIPTION
 Gemini-Live built-in first
-Gemini 3.5 Transcribe Live later as optional shadow STT
+Gemini 3.5 Transcribe Live later as optional analytics shadow STT
 MEDIA
 LiveKit + LiveKit SIP
 TELEPHONY
 Telnyx
+TELEPHONY PRIMITIVES
+LiveKit-native DTMF, optional IVR/AMD and vorbereiteter Cold Transfer
 CONTROL
 MCP 2026-07-28 + REST
 STATE
@@ -4537,16 +4721,17 @@ local tools only in hot path
 session resumption
 context compression
 barge-in tuning
-per-turn latency metrics
+native LiveKit metrics + CallTool-specific metrics
 ```
 
 ## 179. Architektur in einem Satz
 
-> **CallTool ist ein agentenunabhängiger MCP-/REST-Telefonservice, dessen Hot Path über ein auswählbares Gemini- oder OpenAI-Realtime-Modell direkt Audio↔Audio läuft, während lokale Policies und RAM-State Tool Calls in wenigen Millisekunden beantworten und Supervisor, Shadow STT sowie scripted TTS nur dort eingesetzt werden, wo sie zusätzlichen Nutzen bringen, ohne das normale Gespräch zu verlangsamen.**
+> **CallTool ist ein agentenunabhängiger MCP-/REST-Telefonservice, dessen Hot Path über ein auswählbares Gemini- oder OpenAI-Realtime-Modell direkt Audio↔Audio läuft, während LiveKit die Echtzeit- und SIP-Primitive ausführt und CallTool Policies, RAM-State, Tools, Persistenz und Outcomes kontrolliert. Supervisor, Shadow STT und scripted TTS bleiben optionale Nebenpfade, die das normale Gespräch nicht verlangsamen dürfen.**
 
 ## 180. Nächster sinnvoller Engineering-Deliverable
 
-Auf Basis dieses Dokuments sollte als nächstes ein ausführbares Repository-Skeleton entstehen:
+Auf Basis dieses Dokuments sollte als nächstes der v0.1.1-Entwicklungsstand des
+ausführbaren Repository-Skeletons vervollständigt werden:
 
 ```text
 docker compose up -d
@@ -4571,7 +4756,17 @@ phone_call.status
 phone_call.cancel
 ```
 
-plus einem echten Testcall mit dem ausgewählten Realtime-Provider.
+plus:
+
+```text
+Turn Detection per Flag
+native Interruption-Metrik
+optionales IVR / AMD
+Cold-Transfer-Schnittstelle
+native Session-Metriken
+```
+
+und einem echten Testcall mit dem ausgewählten Realtime-Provider.
 
 Erst wenn die gemessene Conversation Response Latency und Barge-in-Qualität stimmen, werden weitere Business-Funktionen gebaut.
 

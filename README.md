@@ -7,6 +7,8 @@ realtime voice provider: Gemini Live or OpenAI Realtime.
 
 The complete architecture and product decisions are documented in
 [projects-v0.1.md](projects-v0.1.md).
+The versioned delivery plan is documented in
+[ROADMAP.md](ROADMAP.md).
 Deployment and Telnyx provisioning are documented in
 [docs/self-hosting.md](docs/self-hosting.md).
 
