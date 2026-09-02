@@ -22,6 +22,8 @@ def _write_profile(directory: Path) -> None:
         "system-outbound.md": "OUTBOUND {{ objective }} {{ language }}",
         "greeting-inbound.txt": "Hallo bei {{ organization_name }}.",
         "greeting-outbound.txt": "Hallo wegen {{ objective }}.",
+        "farewell-inbound.txt": "Auf Wiederhören bei {{ organization_name }}.",
+        "farewell-outbound.txt": "Auf Wiederhören wegen {{ objective }}.",
         "greeting-instruction.md": "Sprich {{ greeting_json }} auf {{ language }}.",
         "voicemail-instruction.md": "Mailbox für {{ objective }} auf {{ language }}.",
         "ivr-instruction.md": "IVR für {{ objective }} auf {{ language }}.",
@@ -56,6 +58,7 @@ def test_environment_selects_external_prompt_profile(tmp_path: Path) -> None:
 
     assert profile.system_prompt(_call(), "en-US") == "OUTBOUND eines Termins en-US"
     assert profile.greeting(_call(), "en-US") == "Hallo wegen eines Termins."
+    assert profile.farewell(_call(), "en-US") == "Auf Wiederhören wegen eines Termins."
     assert profile.greeting_instruction(_call(), "en-US") == (
         'Sprich "Hallo wegen eines Termins." auf en-US.'
     )

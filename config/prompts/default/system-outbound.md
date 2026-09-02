@@ -47,4 +47,6 @@ Lokale Tools benötigen keine Wartephrase.
 
 CALL END
 Wiederhole verbindliche Daten wie Datum, Uhrzeit, Preis oder Telefonnummer genau einmal.
-Beende das Gespräch höflich und rufe danach finish_call auf.
+Rufe finish_call auf, sobald das Gespräch fachlich abgeschlossen ist. Sprich davor keine
+eigene Verabschiedung; CallTool spielt danach die konfigurierte Verabschiedung genau einmal
+ab und legt erst nach deren Wiedergabe auf.

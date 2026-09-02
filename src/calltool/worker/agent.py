@@ -326,6 +326,8 @@ async def handle_call(ctx: JobContext, settings: Settings) -> None:
             )
             end_reason = "finish"
         if end_reason == "finish":
+            if tool_runtime.farewell_required:
+                await _speak_farewell(voice, call)
             with suppress(TimeoutError):
                 async with asyncio.timeout(15):
                     await voice.session.wait_for_idle()
@@ -581,6 +583,30 @@ async def _speak_control_message(
         voice.session.generate_reply(
             instructions=text,
             allow_interruptions=allow_interruptions,
+        )
+
+
+async def _speak_farewell(voice: VoiceRuntime, call: CallRecord) -> None:
+    """Play the configured farewell before the SIP participant is removed."""
+    farewell = voice.prompt_profile.farewell(call, voice.selection.language)
+    try:
+        if voice.farewell_tts is not None:
+            farewell_audio = await pre_synthesize(voice.farewell_tts, farewell)
+            speech = voice.session.say(
+                farewell,
+                audio=frame_stream(farewell_audio),
+                allow_interruptions=False,
+            )
+        else:
+            logger.warning("no deterministic farewell TTS configured", call_id=call.id)
+            return
+        async with asyncio.timeout(10):
+            await speech.wait_for_playout()
+    except Exception as exc:
+        logger.warning(
+            "configured farewell could not be played",
+            call_id=call.id,
+            error=str(exc),
         )
 
 

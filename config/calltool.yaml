@@ -68,6 +68,11 @@ voice:
     model: gemini-3.1-flash-tts-preview
     voice: Puck
     enabled: true
+  farewell_tts:
+    provider: openai
+    model: gpt-4o-mini-tts
+    voice: ash
+    enabled: true
   shadow_stt:
     enabled: false
     provider: gemini
@@ -83,6 +88,8 @@ voice:
     system_outbound: system-outbound.md
     greeting_inbound: greeting-inbound.txt
     greeting_outbound: greeting-outbound.txt
+    farewell_inbound: farewell-inbound.txt
+    farewell_outbound: farewell-outbound.txt
     greeting_instruction: greeting-instruction.md
     voicemail_instruction: voicemail-instruction.md
     ivr_instruction: ivr-instruction.md

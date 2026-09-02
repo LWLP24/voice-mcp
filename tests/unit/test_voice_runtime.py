@@ -146,6 +146,8 @@ async def test_openai_runtime_uses_native_voice_and_transcription_language() -> 
 
     assert runtime.selection.provider == "openai"
     assert runtime.scripted_tts is None
+    assert runtime.farewell_tts is not None
+    assert runtime.farewell_tts.model == "gpt-4o-mini-tts"
     assert model_options.model == "gpt-realtime-2.1-mini"
     assert model_options.voice == "marin"
     assert model_options.input_audio_transcription.language == "en"
@@ -170,6 +172,7 @@ async def test_gemini_scripted_tts_is_available_for_non_german_language() -> Non
     runtime = build_voice_runtime(make_call(), settings, [])
 
     assert runtime.scripted_tts is not None
+    assert runtime.farewell_tts is runtime.scripted_tts
 
 
 @pytest.mark.asyncio

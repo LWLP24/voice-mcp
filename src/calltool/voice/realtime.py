@@ -46,6 +46,7 @@ class VoiceRuntime:
     selection: VoiceSelection
     prompt_profile: PromptProfile
     scripted_tts: tts.TTS[Any] | None
+    farewell_tts: tts.TTS[Any] | None
     turn_detection_mode: Literal["realtime_llm", "livekit_v1_mini"]
     interruption_mode: Literal["vad"]
     turn_unlikely_threshold: float | None
@@ -164,6 +165,15 @@ def build_voice_runtime(
             turn_detection=None if client_side_turn_detection else provider_turn_detection,
         )
         scripted_tts: tts.TTS[Any] | None = None
+        farewell_tts: tts.TTS[Any] | None = (
+            livekit_openai.TTS(
+                model=voice.farewell_tts.model,
+                voice=voice.farewell_tts.voice,
+                api_key=api_key,
+            )
+            if voice.farewell_tts.enabled
+            else None
+        )
     else:
         api_key = settings.GOOGLE_API_KEY.get_secret_value()
         if not api_key:
@@ -216,6 +226,7 @@ def build_voice_runtime(
             and selection.provider == "gemini"
             else None
         )
+        farewell_tts = scripted_tts
 
     turn_detection: Any = "realtime_llm"
     if turn_detection_mode == "livekit_v1_mini":
@@ -263,6 +274,7 @@ def build_voice_runtime(
         selection=selection,
         prompt_profile=prompt_profile,
         scripted_tts=scripted_tts,
+        farewell_tts=farewell_tts,
         turn_detection_mode=turn_detection_mode,
         interruption_mode=interruption_mode,
         turn_unlikely_threshold=turn_unlikely_threshold,

@@ -50,6 +50,7 @@ class ToolRuntime:
     policy: PolicyEngine
     room: rtc.Room
     finish_event: asyncio.Event
+    farewell_required: bool = False
     ivr_config: IVRConfig = field(default_factory=IVRConfig)
     ivr_enabled: bool = False
     cold_transfer_enabled: bool = False
@@ -284,7 +285,13 @@ def build_tools(
         finally:
             TOOL_LATENCY.labels(tool="cold_transfer").observe(time.perf_counter() - started)
 
-    @llm.function_tool(description="Markiert das Gespräch als abgeschlossen und baut das Ergebnis.")
+    @llm.function_tool(
+        description=(
+            "Markiert das Gespräch als abgeschlossen und baut das Ergebnis. "
+            "Nach diesem Tool spielt CallTool die konfigurierte Verabschiedung genau einmal "
+            "ab und legt danach auf; sprich keine eigene Verabschiedung vor dem Tool-Aufruf."
+        )
+    )
     async def finish_call(
         success: bool,
         reason: str,
@@ -304,8 +311,9 @@ def build_tools(
                     notes=notes or [],
                 )
                 await runtime.context.persist_completion(outcome)
+                runtime.farewell_required = True
                 runtime.finish_event.set()
-                return {"accepted": True, "hangup_after_goodbye": True}
+                return {"accepted": True, "farewell_scheduled": True, "hangup_after_goodbye": True}
         finally:
             TOOL_LATENCY.labels(tool="finish_call").observe(time.perf_counter() - started)
 

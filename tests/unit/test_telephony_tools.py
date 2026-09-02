@@ -129,6 +129,33 @@ async def test_cold_transfer_validates_persists_and_completes_call() -> None:
 
 
 @pytest.mark.asyncio
+async def test_finish_call_requests_deterministic_farewell_before_hangup() -> None:
+    repository = MemoryCallRepository()
+    call = make_call()
+    await repository.create_call(call)
+    context = ActiveCallContext.from_call(call, repository)
+    runtime = ToolRuntime(
+        call_id=call.id,
+        context=context,
+        service=MagicMock(),
+        policy=PolicyEngine(PolicyConfig()),
+        room=MagicMock(),
+        finish_event=asyncio.Event(),
+    )
+
+    result = await find_tool(runtime, "finish_call")(
+        True,
+        "test_completed",
+        "Der Test wurde abgeschlossen.",
+    )
+    await context.close()
+
+    assert result["farewell_scheduled"] is True
+    assert runtime.farewell_required is True
+    assert runtime.finish_event.is_set()
+
+
+@pytest.mark.asyncio
 async def test_cold_transfer_is_not_exposed_without_permission() -> None:
     call = make_call(may_transfer=False)
     runtime = ToolRuntime(

@@ -86,6 +86,8 @@ class PromptProfile:
     system_outbound: _PromptTemplate
     greeting_inbound: _PromptTemplate
     greeting_outbound: _PromptTemplate
+    farewell_inbound: _PromptTemplate
+    farewell_outbound: _PromptTemplate
     greeting_instruction_template: _PromptTemplate
     voicemail_instruction_template: _PromptTemplate
     ivr_instruction_template: _PromptTemplate
@@ -103,6 +105,8 @@ class PromptProfile:
             system_outbound=_PromptTemplate.load(directory / config.system_outbound),
             greeting_inbound=_PromptTemplate.load(directory / config.greeting_inbound),
             greeting_outbound=_PromptTemplate.load(directory / config.greeting_outbound),
+            farewell_inbound=_PromptTemplate.load(directory / config.farewell_inbound),
+            farewell_outbound=_PromptTemplate.load(directory / config.farewell_outbound),
             greeting_instruction_template=_PromptTemplate.load(
                 directory / config.greeting_instruction
             ),
@@ -124,6 +128,8 @@ class PromptProfile:
             self.system_outbound.path,
             self.greeting_inbound.path,
             self.greeting_outbound.path,
+            self.farewell_inbound.path,
+            self.farewell_outbound.path,
             self.greeting_instruction_template.path,
             self.voicemail_instruction_template.path,
             self.ivr_instruction_template.path,
@@ -143,6 +149,14 @@ class PromptProfile:
             self.greeting_inbound
             if call.direction is CallDirection.INBOUND
             else self.greeting_outbound
+        )
+        return template.render(_template_values(call, language))
+
+    def farewell(self, call: CallRecord, language: str) -> str:
+        template = (
+            self.farewell_inbound
+            if call.direction is CallDirection.INBOUND
+            else self.farewell_outbound
         )
         return template.render(_template_values(call, language))
 

@@ -125,6 +125,13 @@ class ScriptedTTSConfig(BaseModel):
     enabled: bool = True
 
 
+class FarewellTTSConfig(BaseModel):
+    provider: Literal["openai"] = "openai"
+    model: str = "gpt-4o-mini-tts"
+    voice: str = "ash"
+    enabled: bool = True
+
+
 class ShadowSTTConfig(BaseModel):
     enabled: bool = False
     provider: str = "gemini"
@@ -144,6 +151,8 @@ class PromptProfileConfig(BaseModel):
     system_outbound: str = "system-outbound.md"
     greeting_inbound: str = "greeting-inbound.txt"
     greeting_outbound: str = "greeting-outbound.txt"
+    farewell_inbound: str = "farewell-inbound.txt"
+    farewell_outbound: str = "farewell-outbound.txt"
     greeting_instruction: str = "greeting-instruction.md"
     voicemail_instruction: str = "voicemail-instruction.md"
     ivr_instruction: str = "ivr-instruction.md"
@@ -156,6 +165,8 @@ class PromptProfileConfig(BaseModel):
         "system_outbound",
         "greeting_inbound",
         "greeting_outbound",
+        "farewell_inbound",
+        "farewell_outbound",
         "greeting_instruction",
         "voicemail_instruction",
         "ivr_instruction",
@@ -174,6 +185,7 @@ class PromptProfileConfig(BaseModel):
 class VoiceConfig(BaseModel):
     realtime: RealtimeVoiceConfig = Field(default_factory=RealtimeVoiceConfig)
     scripted_tts: ScriptedTTSConfig = Field(default_factory=ScriptedTTSConfig)
+    farewell_tts: FarewellTTSConfig = Field(default_factory=FarewellTTSConfig)
     shadow_stt: ShadowSTTConfig = Field(default_factory=ShadowSTTConfig)
     supervisor: SupervisorConfig = Field(default_factory=SupervisorConfig)
     prompts: PromptProfileConfig = Field(default_factory=PromptProfileConfig)

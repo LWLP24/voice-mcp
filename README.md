@@ -282,6 +282,11 @@ For OpenAI Realtime, the checked-in profile explicitly selects server VAD with a
 silence duration. This avoids the LiveKit OpenAI plugin's semantic-VAD default for the
 phone path; `voice.realtime.openai_turn_detection` can be switched to `semantic_vad` for
 an A/B test if longer, semantically complete turns are preferred.
+
+OpenAI Realtime does not expose deterministic text playback through `say()` in the
+currently pinned LiveKit plugin. Therefore the configured farewell uses the short
+OpenAI TTS request from `voice.farewell_tts`, then waits for that audio to finish before
+the SIP leg is removed. The normal conversation still uses the configured Realtime voice.
 The local `v1-mini` path disables the realtime provider's server-side endpointing for
 that session, uses the local LiveKit VAD, and loads the approximately 108 MB local
 turn-detector model in the worker process. No external LiveKit service or inference
@@ -345,6 +350,8 @@ is located at `config/prompts/default` and contains:
 | `system-inbound.md` | Complete system prompt for inbound calls |
 | `greeting-outbound.txt` | Default outbound greeting source text |
 | `greeting-inbound.txt` | Default inbound greeting source text |
+| `farewell-outbound.txt` | Configured outbound farewell played before hangup |
+| `farewell-inbound.txt` | Configured inbound farewell played before hangup |
 | `greeting-instruction.md` | Instruction used when the native realtime model localizes the greeting |
 | `voicemail-instruction.md` | Policy-safe message used when AMD selects `leave_message` |
 | `ivr-instruction.md` | Navigation strategy used after AMD recognizes an IVR |
