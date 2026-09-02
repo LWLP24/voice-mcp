@@ -87,7 +87,11 @@ async def bootstrap() -> int:
             )
             print(f"Created Telnyx outbound trunk: {outbound.sip_trunk_id}")
         else:
-            print(f"Telnyx outbound trunk already exists: {outbound.sip_trunk_id}")
+            outbound = await client.sip.update_sip_outbound_trunk(
+                outbound.sip_trunk_id,
+                build_telnyx_trunk(settings),
+            )
+            print(f"Updated Telnyx outbound trunk: {outbound.sip_trunk_id}")
         print(f"Set LIVEKIT_SIP_TRUNK_ID={outbound.sip_trunk_id}")
 
         if settings.config.calls.inbound.enabled:
