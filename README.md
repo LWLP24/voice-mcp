@@ -145,7 +145,7 @@ You also need:
   Realtime calls. Keep optional Gemini shadow STT disabled as well.
 - A self-hosted LiveKit key and secret. For the first local test, keep the matching
   development values from `config/livekit.yaml` and `config/sip.yaml`:
-  `devkey` / `secret`. For production, generate strong values and replace them in all
+  `devkey` / `calltool-local-dev-secret-please-change-before-production`. For production, generate strong values and replace them in all
   three places: `.env`, `config/livekit.yaml`, and `config/sip.yaml`.
 - A strong random `CALLTOOL_API_KEY`. It protects all REST and MCP routes except health,
   readiness, and metrics. Do not leave `change-me` in an internet-facing deployment.
@@ -189,7 +189,7 @@ CallTool. Set it before the first start; changing it later does not change the p
 inside an already-initialized PostgreSQL volume.
 
 For production, change `CALLTOOL_ENV` to `production` only after replacing every
-development placeholder (`change-me`, `devkey`, and `secret`) and applying the matching
+development placeholder (`change-me`, `devkey`, and `calltool-local-dev-secret-please-change-before-production`) and applying the matching
 LiveKit config changes described above. Keep `.env` private and never commit it.
 
 ### Voice provider, model, language, and voice

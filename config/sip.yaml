@@ -1,5 +1,5 @@
 api_key: devkey
-api_secret: secret
+api_secret: calltool-local-dev-secret-please-change-before-production
 ws_url: ws://127.0.0.1:7880
 redis:
   address: 127.0.0.1:6379

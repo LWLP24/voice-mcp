@@ -7,7 +7,7 @@ rtc:
   port_range_end: 60000
   use_external_ip: true
 keys:
-  devkey: secret
+  devkey: calltool-local-dev-secret-please-change-before-production
 logging:
   level: info
   json: true
