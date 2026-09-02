@@ -56,6 +56,7 @@ class SessionObserver:
         self._session.on("user_input_transcribed", self._on_transcript)
         self._session.on("conversation_item_added", self._on_conversation_item)
         self._session.on("tool_execution_updated", self._on_tool_update)
+        self._session.on("function_tools_executed", self._on_function_tools_executed)
         self._session.on("agent_false_interruption", self._on_false_interruption)
         self._session.on("overlapping_speech", self._on_overlapping_speech)
         self._session.on("session_usage_updated", self._on_session_usage)
@@ -89,9 +90,26 @@ class SessionObserver:
             self.spawn(self.persist("call.agent_speech_ended", {}))
 
     def _on_transcript(self, event: Any) -> None:
-        if not self._persist_transcript_enabled or not event.is_final:
+        if not event.is_final:
             return
-        self.spawn(self._persist_user_transcript(str(event.transcript)))
+        transcript = str(event.transcript).strip()
+        if not transcript:
+            return
+        self._watchdog.user_transcript_final()
+        if self._persist_transcript_enabled:
+            self.spawn(self._persist_user_transcript(transcript))
+
+    def _on_function_tools_executed(self, event: Any) -> None:
+        """Prevent a second LLM reply after a terminal ``finish_call`` tool.
+
+        LiveKit emits this event before it generates the automatic tool reply.
+        Cancelling that reply leaves any farewell already spoken in the tool's
+        original response intact, while preventing a second farewell/turn.
+        """
+        calls = getattr(event, "function_calls", ())
+        if any(getattr(function_call, "name", None) == "finish_call" for function_call in calls):
+            event.cancel_tool_reply()
+            self._watchdog.cancel()
 
     def _on_conversation_item(self, event: Any) -> None:
         item = event.item

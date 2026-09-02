@@ -150,6 +150,8 @@ async def test_openai_runtime_uses_native_voice_and_transcription_language() -> 
     assert model_options.voice == "marin"
     assert model_options.input_audio_transcription.language == "en"
     assert model_options.reasoning.effort == "minimal"
+    assert model_options.turn_detection.type == "server_vad"
+    assert model_options.turn_detection.silence_duration_ms == 300
 
 
 @pytest.mark.asyncio
@@ -216,6 +218,47 @@ async def test_livekit_v1_mini_accepts_language_specific_threshold_overrides() -
     thresholds = runtime.session.turn_detection._opts.thresholds
     assert thresholds._thresholds["de"] == 0.61
     assert thresholds._bc_overrides["de"] == 0.42
+
+
+def test_endpointing_overrides_are_validated_and_exposed() -> None:
+    settings = Settings(
+        CALLTOOL_ENV="test",
+        CALLTOOL_ENDPOINTING_MIN_DELAY="0.2",
+        CALLTOOL_ENDPOINTING_MAX_DELAY="0.9",
+    )
+
+    assert settings.endpointing_min_delay() == 0.2
+    assert settings.endpointing_max_delay() == 0.9
+
+
+@pytest.mark.asyncio
+async def test_runtime_passes_endpointing_bounds_to_livekit() -> None:
+    await asyncio.sleep(0)
+    settings = Settings(
+        CALLTOOL_ENV="test",
+        OPENAI_API_KEY=SecretStr("test-openai-key"),
+        CALLTOOL_VOICE_PROVIDER="openai",
+        CALLTOOL_VOICE_MODEL="gpt-realtime-2.1-mini",
+        CALLTOOL_PROMPT_DIR=str(DEFAULT_PROMPT_DIR),
+        CALLTOOL_ENDPOINTING_MIN_DELAY="0.2",
+        CALLTOOL_ENDPOINTING_MAX_DELAY="0.9",
+    )
+
+    runtime = build_voice_runtime(make_call(), settings, [])
+
+    assert runtime.session.options.endpointing["min_delay"] == 0.2
+    assert runtime.session.options.endpointing["max_delay"] == 0.9
+
+
+def test_endpointing_maximum_must_not_be_shorter_than_minimum() -> None:
+    settings = Settings(
+        CALLTOOL_ENV="test",
+        CALLTOOL_ENDPOINTING_MIN_DELAY="1.1",
+        CALLTOOL_ENDPOINTING_MAX_DELAY="0.9",
+    )
+
+    with pytest.raises(ValueError, match="MAX_DELAY"):
+        settings.endpointing_max_delay()
 
 
 def test_turn_threshold_environment_overrides_are_bounded() -> None:

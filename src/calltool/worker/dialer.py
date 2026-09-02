@@ -71,6 +71,25 @@ async def transfer_call(
     )
 
 
+async def hangup_sip_participant(ctx: JobContext, *, participant_identity: str) -> None:
+    """End the SIP leg after the agent has finished its final audio."""
+    try:
+        await ctx.api.room.remove_participant(
+            api.RoomParticipantIdentity(
+                room=ctx.room.name,
+                identity=participant_identity,
+            )
+        )
+    except Exception:
+        # Removing the SIP participant is the precise operation. Deleting the
+        # room is the safe fallback for self-hosted LiveKit versions where the
+        # participant has already left or the remove request races teardown.
+        try:
+            await ctx.api.room.delete_room(api.DeleteRoomRequest(room=ctx.room.name))
+        except Exception as fallback_exc:
+            raise RuntimeError("SIP hangup failed") from fallback_exc
+
+
 def sip_error(error: api.SipCallError) -> tuple[str, bool]:
     status_code = error.sip_status_code
     if status_code == 486:

@@ -262,6 +262,8 @@ Krisp, and keep IVR, AMD, and Cold Transfer disabled:
 ```dotenv
 CALLTOOL_TURN_DETECTION_MODE=realtime_llm
 CALLTOOL_INTERRUPTION_MODE=vad
+CALLTOOL_ENDPOINTING_MIN_DELAY=0.3
+CALLTOOL_ENDPOINTING_MAX_DELAY=1.0
 CALLTOOL_IVR_ENABLED=false
 CALLTOOL_AMD_ENABLED=false
 CALLTOOL_COLD_TRANSFER_ENABLED=false
@@ -270,6 +272,16 @@ CALLTOOL_KRISP_ENABLED=false
 
 Empty values use `config/calltool.yaml`. Valid turn modes are `realtime_llm` and
 `livekit_v1_mini`; the only interruption mode in this fully self-hosted build is `vad`.
+The endpointing bounds are applied by LiveKit's local `AgentSession` around the
+provider/native turn detector. They prevent the LiveKit default maximum wait of 3 seconds
+from becoming an avoidable response delay. The lower values make replies faster but can
+end a turn during a short pause, so tune them with real calls. For OpenAI Realtime, the
+provider's own server VAD remains active in `realtime_llm` mode; its server-side VAD can
+also be tuned independently when the plugin exposes those options.
+For OpenAI Realtime, the checked-in profile explicitly selects server VAD with a 300 ms
+silence duration. This avoids the LiveKit OpenAI plugin's semantic-VAD default for the
+phone path; `voice.realtime.openai_turn_detection` can be switched to `semantic_vad` for
+an A/B test if longer, semantically complete turns are preferred.
 The local `v1-mini` path disables the realtime provider's server-side endpointing for
 that session, uses the local LiveKit VAD, and loads the approximately 108 MB local
 turn-detector model in the worker process. No external LiveKit service or inference
