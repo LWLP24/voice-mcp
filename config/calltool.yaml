@@ -46,6 +46,19 @@ voice:
       # null keeps the detector defaults until that calibration exists.
       unlikely_threshold: null
       backchannel_threshold: null
+    # LiveKit's AgentSession default max endpointing delay is 3s. Keep the
+    # provider-native Realtime VAD, but bound the local wait for a response.
+    endpointing:
+      min_delay_seconds: 0.3
+      max_delay_seconds: 1.0
+    # The LiveKit OpenAI plugin otherwise defaults to semantic VAD (medium).
+    # Server VAD gives this phone agent a predictable, low-latency turn end.
+    openai_turn_detection:
+      mode: server_vad
+      threshold: 0.5
+      prefix_padding_ms: 300
+      silence_duration_ms: 300
+      eagerness: medium
     interruptions:
       mode: vad
       min_duration_seconds: 0.15

@@ -10,6 +10,7 @@ from livekit.agents.voice import amd
 from livekit.plugins import google
 from livekit.plugins import openai as livekit_openai
 from openai.types.realtime import AudioTranscription, RealtimeReasoning
+from openai.types.realtime.realtime_audio_input_turn_detection import SemanticVad, ServerVad
 
 from calltool.calls.models import CallRecord, CallVoiceOptions
 from calltool.config import Settings
@@ -129,6 +130,24 @@ def build_voice_runtime(
         api_key = settings.OPENAI_API_KEY.get_secret_value()
         if not api_key:
             raise ValueError("OPENAI_API_KEY is required for the OpenAI Realtime provider")
+        openai_turn_detection = settings.config.voice.realtime.openai_turn_detection
+        provider_turn_detection = (
+            ServerVad(
+                type="server_vad",
+                threshold=openai_turn_detection.threshold,
+                prefix_padding_ms=openai_turn_detection.prefix_padding_ms,
+                silence_duration_ms=openai_turn_detection.silence_duration_ms,
+                create_response=True,
+                interrupt_response=True,
+            )
+            if openai_turn_detection.mode == "server_vad"
+            else SemanticVad(
+                type="semantic_vad",
+                eagerness=openai_turn_detection.eagerness,
+                create_response=True,
+                interrupt_response=True,
+            )
+        )
         realtime = livekit_openai.realtime.RealtimeModel(
             model=selection.model,
             api_key=api_key,
@@ -142,7 +161,7 @@ def build_voice_runtime(
                 else None
             ),
             reasoning=RealtimeReasoning(effort=voice.realtime.thinking_level),
-            turn_detection=None if client_side_turn_detection else NOT_GIVEN,
+            turn_detection=None if client_side_turn_detection else provider_turn_detection,
         )
         scripted_tts: tts.TTS[Any] | None = None
     else:
@@ -210,6 +229,10 @@ def build_voice_runtime(
         turn_detection = inference.TurnDetector(**detector_options)
     turn_handling: TurnHandlingOptions = {
         "turn_detection": turn_detection,
+        "endpointing": {
+            "min_delay": settings.endpointing_min_delay(),
+            "max_delay": settings.endpointing_max_delay(),
+        },
         "interruption": {
             "enabled": True,
             "mode": interruption_mode,

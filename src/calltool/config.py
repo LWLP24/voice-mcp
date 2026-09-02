@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Literal, cast
 
 import yaml
-from pydantic import BaseModel, Field, SecretStr, field_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from calltool.language import normalize_language_code
@@ -66,6 +66,29 @@ class TurnDetectionConfig(BaseModel):
     backchannel_threshold: float | None = Field(default=None, ge=0, le=1)
 
 
+class EndpointingConfig(BaseModel):
+    """Local safety bounds around provider/native turn detection."""
+
+    min_delay_seconds: float = Field(default=0.3, ge=0)
+    max_delay_seconds: float = Field(default=1.0, ge=0.3)
+
+    @model_validator(mode="after")
+    def validate_delay_order(self) -> EndpointingConfig:
+        if self.max_delay_seconds < self.min_delay_seconds:
+            raise ValueError("endpointing max_delay_seconds must be >= min_delay_seconds")
+        return self
+
+
+class OpenAITurnDetectionConfig(BaseModel):
+    """Provider-native turn detection settings for OpenAI Realtime."""
+
+    mode: Literal["server_vad", "semantic_vad"] = "server_vad"
+    threshold: float = Field(default=0.5, ge=0, le=1)
+    prefix_padding_ms: int = Field(default=300, ge=0, le=2000)
+    silence_duration_ms: int = Field(default=300, ge=100, le=5000)
+    eagerness: Literal["low", "medium", "high", "auto"] = "medium"
+
+
 class InterruptionConfig(BaseModel):
     mode: Literal["vad"] = "vad"
     min_duration_seconds: float = Field(default=0.15, ge=0)
@@ -83,6 +106,10 @@ class RealtimeVoiceConfig(BaseModel):
     context_compression: ToggleConfig = Field(default_factory=ToggleConfig)
     session_resumption: ToggleConfig = Field(default_factory=ToggleConfig)
     turn_detection: TurnDetectionConfig = Field(default_factory=TurnDetectionConfig)
+    endpointing: EndpointingConfig = Field(default_factory=EndpointingConfig)
+    openai_turn_detection: OpenAITurnDetectionConfig = Field(
+        default_factory=OpenAITurnDetectionConfig
+    )
     interruptions: InterruptionConfig = Field(default_factory=InterruptionConfig)
 
     @field_validator("language")
@@ -281,6 +308,8 @@ class Settings(BaseSettings):
     CALLTOOL_TURN_DETECTION_MODE: str = ""
     CALLTOOL_TURN_UNLIKELY_THRESHOLD: str = ""
     CALLTOOL_TURN_BACKCHANNEL_THRESHOLD: str = ""
+    CALLTOOL_ENDPOINTING_MIN_DELAY: str = ""
+    CALLTOOL_ENDPOINTING_MAX_DELAY: str = ""
     CALLTOOL_INTERRUPTION_MODE: str = ""
     CALLTOOL_IVR_ENABLED: str = ""
     CALLTOOL_AMD_ENABLED: str = ""
@@ -374,6 +403,26 @@ class Settings(BaseSettings):
             "CALLTOOL_TURN_BACKCHANNEL_THRESHOLD",
         )
 
+    def endpointing_min_delay(self) -> float:
+        return self._endpointing_override(
+            self.CALLTOOL_ENDPOINTING_MIN_DELAY,
+            self.config.voice.realtime.endpointing.min_delay_seconds,
+            "CALLTOOL_ENDPOINTING_MIN_DELAY",
+        )
+
+    def endpointing_max_delay(self) -> float:
+        configured = self.config.voice.realtime.endpointing.max_delay_seconds
+        value = self._endpointing_override(
+            self.CALLTOOL_ENDPOINTING_MAX_DELAY,
+            configured,
+            "CALLTOOL_ENDPOINTING_MAX_DELAY",
+        )
+        if value < self.endpointing_min_delay():
+            raise ValueError(
+                "CALLTOOL_ENDPOINTING_MAX_DELAY must be >= CALLTOOL_ENDPOINTING_MIN_DELAY"
+            )
+        return value
+
     def ivr_enabled(self) -> bool:
         return self._boolean_override(
             self.CALLTOOL_IVR_ENABLED,
@@ -424,6 +473,19 @@ class Settings(BaseSettings):
             raise ValueError(f"{name} must be a number between 0 and 1") from exc
         if not math.isfinite(parsed) or not 0 <= parsed <= 1:
             raise ValueError(f"{name} must be a number between 0 and 1")
+        return parsed
+
+    @staticmethod
+    def _endpointing_override(raw_value: str, configured: float, name: str) -> float:
+        value = raw_value.strip()
+        if not value:
+            return configured
+        try:
+            parsed = float(value)
+        except ValueError as exc:
+            raise ValueError(f"{name} must be a non-negative number") from exc
+        if not math.isfinite(parsed) or parsed < 0:
+            raise ValueError(f"{name} must be a non-negative number")
         return parsed
 
 

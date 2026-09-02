@@ -4,6 +4,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
@@ -22,6 +23,7 @@ from calltool.worker.session import SessionObserver
 class FakeSession:
     def __init__(self) -> None:
         self.agent_state = "speaking"
+        self.user_state = "listening"
         self.llm = None
         self.stt = None
         self.tts = None
@@ -120,3 +122,33 @@ async def test_native_interruption_false_interruption_and_usage_are_collected() 
     assert context.voice_session.model_usage == [
         {"model": "gpt-realtime-2.1-mini", "input_tokens": 12}
     ]
+
+
+@pytest.mark.asyncio
+async def test_terminal_finish_tool_cancels_livekit_tool_reply() -> None:
+    repository = MemoryCallRepository()
+    call = make_call()
+    context = ActiveCallContext.from_call(call, repository)
+    session = FakeSession()
+    async def on_unrecoverable() -> None:
+        return None
+
+    observer = SessionObserver(
+        session,
+        context,
+        persist_transcript=False,
+        watchdog_silence_seconds=2.5,
+        watchdog_recovery_instruction="recover",
+        watchdog_fallback_phrase="fallback",
+        on_unrecoverable=on_unrecoverable,
+    )
+    event = SimpleNamespace(
+        function_calls=[SimpleNamespace(name="finish_call")],
+        cancel_tool_reply=Mock(),
+    )
+
+    observer._on_function_tools_executed(event)
+
+    event.cancel_tool_reply.assert_called_once_with()
+    await observer.close()
+    await context.close()

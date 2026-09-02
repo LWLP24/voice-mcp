@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -20,6 +21,7 @@ from calltool.policy.engine import PolicyEngine
 from calltool.realtime.active_calls import ActiveCallContext
 from calltool.storage.memory import MemoryCallRepository
 from calltool.voice.tools import ToolRuntime, TransferResult, build_tools
+from calltool.worker.dialer import hangup_sip_participant
 
 
 def make_call(*, may_transfer: bool = False) -> CallRecord:
@@ -142,3 +144,23 @@ async def test_cold_transfer_is_not_exposed_without_permission() -> None:
     names = [tool.info.name for tool in build_tools(runtime, direction=CallDirection.OUTBOUND)]
 
     assert "cold_transfer" not in names
+
+
+@pytest.mark.asyncio
+async def test_hangup_removes_the_sip_participant() -> None:
+    room_api = SimpleNamespace(
+        remove_participant=AsyncMock(),
+        delete_room=AsyncMock(),
+    )
+    ctx = SimpleNamespace(
+        api=SimpleNamespace(room=room_api),
+        room=SimpleNamespace(name="call-room"),
+    )
+
+    await hangup_sip_participant(ctx, participant_identity="callee-test")
+
+    room_api.remove_participant.assert_awaited_once()
+    request = room_api.remove_participant.await_args.args[0]
+    assert request.room == "call-room"
+    assert request.identity == "callee-test"
+    room_api.delete_room.assert_not_awaited()

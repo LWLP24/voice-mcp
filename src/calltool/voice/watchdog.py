@@ -35,10 +35,22 @@ class VoiceWatchdog:
         self._agent_spoke = asyncio.Event()
 
     def user_state_changed(self, old_state: str, new_state: str) -> None:
-        if old_state == "speaking" and new_state == "listening":
-            self._arm()
-        elif new_state == "speaking":
+        if new_state == "speaking":
             self._cancel_watch()
+
+    def user_transcript_final(self) -> None:
+        """Arm only after a committed turn, not merely after VAD silence.
+
+        Realtime providers can move the user state to ``listening`` before the
+        final transcript arrives. Arming on that state transition races the
+        provider and can generate a watchdog fallback for a perfectly valid,
+        merely delayed turn.
+        """
+        if self._session.user_state != "speaking":
+            self._arm()
+
+    def cancel(self) -> None:
+        self._cancel_watch()
 
     def agent_state_changed(self, new_state: str) -> None:
         if new_state == "speaking":

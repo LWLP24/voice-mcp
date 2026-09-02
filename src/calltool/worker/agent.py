@@ -21,6 +21,7 @@ from calltool.calls.models import (
     CallPhase,
     CallRecord,
     CallStatus,
+    TransferStatus,
     utc_now,
 )
 from calltool.calls.service import CallService
@@ -33,7 +34,7 @@ from calltool.voice.realtime import VoiceRuntime, build_amd_detector, build_voic
 from calltool.voice.scripted_speech import frame_stream, pre_synthesize
 from calltool.voice.supervisor import GeminiSupervisor
 from calltool.voice.tools import ToolRuntime, TransferResult, build_tools
-from calltool.worker.dialer import dial_call, sip_error, transfer_call
+from calltool.worker.dialer import dial_call, hangup_sip_participant, sip_error, transfer_call
 from calltool.worker.session import SessionObserver
 
 logger = structlog.get_logger(__name__)
@@ -328,6 +329,20 @@ async def handle_call(ctx: JobContext, settings: Settings) -> None:
             with suppress(TimeoutError):
                 async with asyncio.timeout(15):
                     await voice.session.wait_for_idle()
+            transfer = active_context.snapshot().voice_session.transfer
+            if transfer is None or transfer.status is not TransferStatus.SUCCESSFUL:
+                try:
+                    await hangup_sip_participant(
+                        ctx,
+                        participant_identity=participant_identity,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "could not explicitly hang up SIP participant",
+                        call_id=call.id,
+                        participant_identity=participant_identity,
+                        error=str(exc),
+                    )
         elif end_reason == "watchdog":
             closed_session = voice.session
             await _close_voice_session(closed_session, drain=False)
